@@ -53,6 +53,17 @@ creates is visible over training, not just at the end), addiction metrics,
 DAN rates, AND the current value of every steering param (a, c, m, h, b),
 so preference drift toward/away from any source is visible directly in
 eval.csv.
+
+Task 4 (per-parameter Adam lr): per-parameter ES sigma alone is not enough
+-- Adam moves each parameter by at most ~lr per generation regardless of
+sigma, so the O(1)-scale steering params (sigma=0.3) still crawl under a
+single small shared lr. --lr-steer (spec: 0.2) gives the same 19 steering
+params a LARGER Adam lr than --lr (spec: 0.03) gives the rest, built into a
+(P,) vector the same way as sigma_vec (see Adam and
+flyrl.policy.steering_param_sigma_vector). After each update, the steering
+params are clipped to a sane box (clip_steering_params: a/c/m/h in
+[-8, 8], b_steer in [-6, 2]) so the larger, faster steps cannot run the
+encoder's sigmoid drives away.
 """
 
 from __future__ import annotations
@@ -193,8 +204,25 @@ def es_gradient(eps_half: np.ndarray, fitness: np.ndarray, sigma) -> np.ndarray:
 
 
 class Adam:
+    """Adam optimizer over a flat (P,) parameter vector. `lr` may be a
+    python/numpy scalar (every parameter shares one lr) or a (P,) per-
+    parameter array (Task 4: --lr-steer gives the 19 O(1)-scale steering
+    params -- see flyrl.policy.steering_param_names -- a LARGER lr than the
+    rest, built the same way as the per-parameter ES sigma; see
+    steering_param_sigma_vector). mhat/vhat in step() are always (P,)
+    arrays, so `self.lr * mhat / ...` broadcasts correctly whether self.lr
+    is a scalar or a (P,) array -- no other logic changes needed for
+    per-parameter lr."""
+
     def __init__(self, n_params, lr=0.03, beta1=0.9, beta2=0.999, eps=1e-8):
-        self.lr = lr
+        lr_arr = np.asarray(lr, dtype=np.float64)
+        if lr_arr.ndim > 0:
+            assert lr_arr.shape == (n_params,), (
+                f"lr array must have shape ({n_params},), got {lr_arr.shape}"
+            )
+            self.lr = lr_arr
+        else:
+            self.lr = float(lr_arr)
         self.beta1 = beta1
         self.beta2 = beta2
         self.eps = eps
@@ -228,6 +256,30 @@ def build_population(mean_theta: np.ndarray, sigma, half: int, rng: np.random.Ge
         mean_theta[None, :] - sigma * eps_half,
     ], axis=0)
     return theta_pop.astype(np.float32), eps_half
+
+
+# Task 4 (per-parameter Adam lr): now that --lr-steer lets the 19
+# steering-encoder params move much faster per generation than the rest,
+# clip them to a sane box after every update so the sigmoid drives (see
+# flyrl.policy.BrainPolicy._encode) cannot run away. Indices found via the
+# existing steering_param_names() helper (fixed layout: b_steer, then
+# a/c/m/h -- see its docstring).
+_STEER_NAMES = steering_param_names()
+_B_STEER_IDX = np.array([i for i, n in enumerate(_STEER_NAMES) if n == "b_steer"])
+_OTHER_STEER_IDX = np.array([i for i, n in enumerate(_STEER_NAMES) if n != "b_steer"])
+STEER_CLIP_B = (-6.0, 2.0)      # b_steer box
+STEER_CLIP_ACMH = (-8.0, 8.0)   # a, c, m, h box
+
+
+def clip_steering_params(theta: np.ndarray) -> np.ndarray:
+    """Clip the 19 steering-encoder params (see steering_param_names) to a
+    sane box: b_steer in STEER_CLIP_B, a/c/m/h in STEER_CLIP_ACMH. All
+    other (non-steering) params are returned unchanged. Returns a new
+    array (does not mutate `theta` in place)."""
+    theta = theta.copy()
+    theta[_B_STEER_IDX] = np.clip(theta[_B_STEER_IDX], *STEER_CLIP_B)
+    theta[_OTHER_STEER_IDX] = np.clip(theta[_OTHER_STEER_IDX], *STEER_CLIP_ACMH)
+    return theta
 
 
 # ---------------------------------------------------------------------
@@ -304,7 +356,14 @@ def load_checkpoint(run_dir: Path):
     data = np.load(ckpt_path, allow_pickle=False)
     config = json.loads(str(data["config_json"]))
     mean_theta = data["mean_theta"].astype(np.float64)
-    adam = Adam(mean_theta.shape[0], lr=config["lr"])
+    # Task 4: rebuild the same (P,) per-parameter lr vector used during
+    # training (config["lr_steer"] falls back to config["lr"] for
+    # checkpoints saved before --lr-steer existed, i.e. a uniform lr).
+    # Adam's own state (m, v, t) is unchanged in shape by this -- only the
+    # lr multiplier used going forward changes.
+    lr_steer = config.get("lr_steer", config["lr"])
+    lr_vec = steering_param_sigma_vector(config["lr"], lr_steer, mean_theta.shape[0])
+    adam = Adam(mean_theta.shape[0], lr=lr_vec)
     adam.load_state_dict({"m": data["adam_m"], "v": data["adam_v"], "t": data["adam_t"]})
     gen = int(data["gen"])
     return gen, mean_theta, adam, config
@@ -349,6 +408,15 @@ def main(argv=None):
                               "scaling (Task 3); see flyrl.policy.steering_param_sigma_vector.")
     parser.add_argument("--sigma-decay", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=0.03)
+    parser.add_argument("--lr-steer", type=float, default=0.2,
+                         help="Task 4: LARGER Adam lr for the 19 steering-encoder params "
+                              "(a/c/m/h/b -- O(1)-scale quantities that must travel ~3 units, "
+                              "e.g. c_smoke 3->6) than --lr for the decoder + 12 contact/intero "
+                              "encoder params. Adam moves each parameter by at most ~lr per "
+                              "generation, so a single shared lr badly under-trains the "
+                              "steering params relative to their larger --sigma-steer. Built "
+                              "into a (P,) per-parameter lr vector the same way as "
+                              "--sigma/--sigma-steer -- see steering_param_sigma_vector.")
     parser.add_argument("--n-steps", type=int, default=300)
     parser.add_argument("--dt", type=float, default=0.5)
     parser.add_argument("--steps-per-action", type=int, default=20)
@@ -400,7 +468,11 @@ def main(argv=None):
             print(f"Initialized mean_theta from {args.init_from}")
         else:
             mean_theta = default_params(seed=args.seed).astype(np.float64)
-        adam = Adam(mean_theta.shape[0], lr=args.lr)
+        # Task 4: per-parameter Adam lr, built exactly like sigma_vec below
+        # (reusing steering_param_sigma_vector) -- lr_steer for the 19
+        # steering params, lr for everything else.
+        lr_vec = steering_param_sigma_vector(args.lr, args.lr_steer, mean_theta.shape[0])
+        adam = Adam(mean_theta.shape[0], lr=lr_vec)
         start_gen = 0
 
     # Task 3: per-parameter ES sigma -- the 19 steering-encoder params (a, c,
@@ -445,6 +517,7 @@ def main(argv=None):
         grad = es_gradient(eps_half, result.fitness, sigma_vec)
         update = adam.step(grad)
         mean_theta = mean_theta + update
+        mean_theta = clip_steering_params(mean_theta)
         sigma_vec = sigma_vec * args.sigma_decay
 
         wall_s = time.time() - t0
