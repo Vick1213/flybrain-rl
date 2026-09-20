@@ -1,0 +1,26 @@
+{
+  "n_candidates": 322,
+  "candidates_per_family": {
+    "ORN": 42,
+    "ALPN": 41,
+    "ALPN_pool": 4,
+    "JO": 59,
+    "visual": 69,
+    "gustatory": 76,
+    "gustatory_sugar": 1,
+    "gustatory_bitter": 2,
+    "endocrine": 20,
+    "neuromod": 8
+  },
+  "n_stimuli": 644,
+  "n_waves": 21,
+  "food_channel_for_gating": "ALPN_DA2_L",
+  "ignition_threshold": 40000,
+  "rates_hz": [
+    50.0,
+    150.0
+  ],
+  "window_ms": 300.0,
+  "dt_ms": 0.5,
+  "wall_s_total": 119.63895797729492
+}

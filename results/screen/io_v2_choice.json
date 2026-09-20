@@ -1,0 +1,139 @@
+{
+  "_comment": "Task B decision, derived from results/screen/candidate_summary.csv, cosine_similarity.csv, mirror_consistency.csv, gating.csv and gating_v2_visual_ref.csv (see scripts/screen_entry_points.py). All neuron counts are 'present in fb.flyid_to_index' counts (v783 root_ids missing from the FastBrain model are dropped; drop counts are ~0-5 for every population used here -- see annotated vs present below).",
+
+  "headline_findings": {
+    "ORN_is_unusable": "Every ORN glomerulus type tested ignites the whole network (>40k spikes/300ms) at rates as low as 1-2 Hz (e.g. ORN_DM1_L: 92991 spikes @ 1 Hz). ORN input has NO usable graded operating range in this connectome at all -- this is worse than the original v1 diagnosis (which only tested 150 Hz) suggested.",
+    "ALPN_mostly_bistable": "41 uniglomerular ALPN types (>=3 neurons/side) were screened at 50/150 Hz; 38/41 ignite at 150 Hz and 26/41 already ignite at 50 Hz. A follow-up dose-response sweep (10 more ALPN types x 4 independent RNG seeds/histories x rates 1-150 Hz) found that ignition onset for a given (type, rate) is NOT reproducible across RNG histories -- e.g. ALPN DC4_L gave 37575 spikes (near-threshold, not ignited) @ 50 Hz in one run and 49 spikes (silent) @ 50 Hz in another; ALPN DA1_L ignited already at 10 Hz in one run. This connectome's excitatory-drive response is a chaotic/stochastic threshold phenomenon near the ignition boundary, not a deterministic function of rate.",
+    "single_robust_olfactory_channel": "Exactly ONE olfactory (ORN or ALPN) candidate, ALPN glomerulus DA2, stayed non-igniting and reproducible across all 4 independent seed/history trials spanning 1-150 Hz. It gives a small, real, essentially perfectly lateralized DN response only at the top of that range (150 Hz: LI=+1.0 left-stim / -1.0 right-stim), but the response is just 1 of 1409 candidate DN/motor neurons -- a very weak signal.",
+    "no_second_robust_olfactory_channel": "No second ALPN or ORN glomerulus was found with DA2's reproducibility. The next-best candidate (ALPN DC4) gives a substantial DN response (55-165/1409 responsive neurons) when it does NOT ignite, but ignition risk could not be eliminated by rate alone within the time available for this screen -- see food_odor entry below. This is reported as an explicit, unresolved risk, per the spec's instruction to say so plainly when nothing is safely lateralized.",
+    "visual_is_the_reliable_channel": "All 69 visual_projection types screened (>=40 neurons/side) NEVER ignited at 50 or 150 Hz, and several are strongly and reproducibly lateralized: LC10e LI=0.85-0.97, LC10c-1 LI=0.83-0.84, LC10d LI=0.78, with real DN drive (26-111 responsive DN/motor neurons). Visual is unambiguously the best-behaved sensory pathway in this connectome -- consistent with the spec's suggested fallback (v2 uses visual_projection for reels_light as prescribed) but going further: it is better-behaved than EITHER olfactory route, not just a fallback for photoreceptors.",
+    "gustatory_mostly_safe": "75/76 gustatory cell-type x side candidates do not ignite at 150 Hz; the dedicated 21-neuron sugar GRN benchmark set and the pooled bitter-GRN set both give real, non-igniting DN responses.",
+    "endocrine_confirmed_dead": "All 20 endocrine cell-type x side candidates (IPC, DH44, DH31, CRZ, ITP, DMS, Hugin-RG, CAPA, mNSC/lNSC_unknown) gave ZERO direct DN response alone, matching v1's diagnosis. A follow-up gating test (co-stimulating each with a real-baseline reference population, since the auto-selected weak DA2 reference gave an underpowered null test) found NO consistent gating effect either (delta_dm_spikes in [-47, +35] against a baseline of 370, i.e. noise-level, no sign consistency). Endocrine neurosecretory cells are not used anywhere in io_v2.",
+    "octopamine_and_DAN_are_the_working_interoceptive_channels": "Octopaminergic neurons (top_nt=octopamine) give a real, non-igniting, lateralized (LI=0.87-0.89) direct DN response AND a positive gating effect (+71 to +79% DM spikes on top of a real baseline). DAN PAM gives strong direct DAN-pool activation and a positive gating effect (+16 to +22%). DAN PPL gives the LARGEST gating effect (+170 to +277%) but ignites at 150 Hz (safe at 50 Hz). These three replace endocrine as the interoceptive entry points."
+  },
+
+  "final_groups": [
+    {
+      "obs_channels": ["food_odor_L", "food_odor_R"],
+      "population": "ALPN uniglomerular DC4 (cell_class=ALPN, cell_sub_class=uniglomerular, glomerulus=DC4)",
+      "level": "ALPN",
+      "n_neurons": {"left": 3, "right": 3},
+      "max_rate_hz": 20.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "LOW -- see risk note",
+      "risk_note": "DC4 is the best available SECOND distinguishable olfactory channel (ALPN DA2, the one fully robust channel, is used for smoke below). DC4 gives a real DN response (55-165 responsive DN/motor neurons out of 1409) when sub-ignition, but dose-response probing across independent RNG histories showed DC4 ignites somewhere between 15-50 Hz depending on (unpredictable) history. max_rate_hz=20 keeps the encoder's ceiling in the region that was never observed to ignite across 3 independent trials, but this is NOT a guarantee -- occasional ignition during ES training is a real, documented possibility and should be monitored (e.g. via mean_dan_rate_hz or wall_s/gen spiking abnormally).",
+      "lateralization_LI_at_50Hz": {"left_stim": 0.067, "right_stim": 0.124},
+      "cosine_similarity_to_smoke_channel": 0.0
+    },
+    {
+      "obs_channels": ["smoke_odor_L", "smoke_odor_R"],
+      "population": "ALPN uniglomerular DA2 (cell_class=ALPN, cell_sub_class=uniglomerular, glomerulus=DA2)",
+      "level": "ALPN",
+      "n_neurons": {"left": 5, "right": 6},
+      "max_rate_hz": 150.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "HIGH for non-ignition, LOW for signal strength",
+      "risk_note": "The only olfactory candidate confirmed non-igniting across 4 independent RNG seed/history trials spanning 1-150 Hz. Response is very weak (1 of 1409 DN/motor neurons spikes a handful of times per 300ms window even at 150 Hz) but perfectly lateralized when it does (LI=+1.0 left-stim, -1.0 right-stim). Matches the spec's own suggested smoke glomerulus set (DL5, V, DA2).",
+      "lateralization_LI_at_150Hz": {"left_stim": 1.0, "right_stim": -1.0},
+      "mirror_consistency": -0.001,
+      "note_on_mirror_consistency": "Near-zero because the response is a single sparse spike, not a patterned multi-DN response -- do not over-interpret the LI=+-1 as a rich lateralized code; treat DA2 as a weak, reliable identity/side tag, not a strong signal.",
+      "cosine_similarity_to_food_channel": 0.0
+    },
+    {
+      "obs_channels": ["reels_light_L", "reels_light_R"],
+      "population": "visual_projection LC10e",
+      "level": "visual_projection (lobula columnar)",
+      "n_neurons": {"left": 52, "right": 51},
+      "max_rate_hz": 150.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "HIGH",
+      "lateralization_LI_at_150Hz": {"left_stim": 0.846, "right_stim": 0.877},
+      "dm_n_responsive_at_150Hz": {"left_stim": 45, "right_stim": 56},
+      "mirror_consistency": 0.862,
+      "cosine_similarity_to_jackpot_channel": "0.05-0.21 (see cosine_similarity.csv, VIS_LC10e_[LR] vs VIS_MeTu1_[LR])"
+    },
+    {
+      "obs_channels": ["reels_jackpot"],
+      "population": "visual_projection MeTu1, pooled left+right (unsplit -- env's jackpot cue is a non-lateralized scalar flash)",
+      "level": "visual_projection (medulla-tubercle, anterior visual pathway -- functionally distinct from the LC10e looming/motion pathway)",
+      "n_neurons": {"left": 120, "right": 124, "pooled": 244},
+      "max_rate_hz": 150.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "HIGH",
+      "dm_n_responsive_at_150Hz": {"left_stim": 40, "right_stim": 72},
+      "own_LI_at_150Hz": {"left_stim": 0.855, "right_stim": 0.716},
+      "note": "MeTu1 is itself well-lateralized but is used unsplit/pooled here since reels_jackpot is a single scalar obs channel, not an L/R pair."
+    },
+    {
+      "obs_channels": ["sugar_taste"],
+      "population": "unchanged from v1: the 21-neuron sugar-GRN benchmark set (cell_type=LB3, cell_sub_class=sugar/water; flyrl.io_neurons.SUGAR_GRN_IDS, matches eon-fly-brain/code/benchmark.py EXPERIMENTS['sugar'])",
+      "level": "gustatory GRN",
+      "n_neurons": {"pooled": 21},
+      "max_rate_hz": 200.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "HIGH",
+      "dm_n_responsive_at_150Hz": 85,
+      "note": "max_rate kept at 200 Hz to match the reference benchmark experiment's own designed operating point (never tested above 150 in this screen, but 200 is the source repo's own validated value for this exact neuron set)."
+    },
+    {
+      "obs_channels": ["nicotine_taste"],
+      "population": "pooled bitter GRNs (cell_class=gustatory, cell_sub_class=bitter: cell_types LB1a,LB1d / LB1b / LB1c / LB1e), left+right pooled",
+      "level": "gustatory GRN",
+      "n_neurons": {"left": 32, "right": 33, "pooled": 65},
+      "max_rate_hz": 150.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "MEDIUM",
+      "dm_n_responsive_at_150Hz": {"left_stim": 58, "right_stim": 3},
+      "note": "Real but side-asymmetric response (58 vs 3 responsive DNs at the same rate) -- pooled L+R here since nicotine_taste, like sugar_taste, is a non-lateralized 'am I tasting this' cue in the env, not a directional one."
+    },
+    {
+      "obs_channels": ["hunger"],
+      "population": "octopaminergic neurons (top_nt=octopamine), left+right pooled",
+      "level": "mixed (sensory/central/endocrine octopaminergic neurons -- top_nt filter, not a single super_class)",
+      "n_neurons": {"left": 64, "right": 129, "pooled": 193},
+      "max_rate_hz": 150.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "MEDIUM-HIGH",
+      "direct_dm_n_responsive_at_150Hz": {"left_stim": 34, "right_stim": 16},
+      "gating_effect_pct_dm_spikes": {"left_stim": "+78.6%", "right_stim": "+71.1%"},
+      "rationale": "Octopamine is the fly's well-documented starvation/arousal/food-seeking-state neuromodulator, and is the only interoceptive candidate with BOTH a real direct DN effect and a real positive gating effect on a co-active sensory drive -- a biologically apt and empirically the best-supported choice for hunger."
+    },
+    {
+      "obs_channels": ["nicotine"],
+      "population": "DAN PAM cluster (cell_class=DAN, cell_type prefix 'PAM'), left+right pooled",
+      "level": "DAN",
+      "n_neurons": {"left": 154, "right": 153, "pooled": 307},
+      "max_rate_hz": 150.0,
+      "ignites_at_operating_rate": false,
+      "confidence": "MEDIUM-HIGH",
+      "direct_dan_pool_response": "154/154 and 153/153 DAN neurons responsive (near-total self-activation, expected)",
+      "gating_effect_pct_dm_spikes": {"left_stim": "+16.5%", "right_stim": "+22.4%"},
+      "rationale": "PAM is the mushroom-body reward/valence DAN cluster; nicotine's dopaminergic-hijack mechanism (train_es.py's beta_nic hijacked-mode bonus) is most directly modeled by a channel that drives the reward DAN population itself."
+    },
+    {
+      "obs_channels": ["withdrawal"],
+      "population": "DAN PPL cluster (cell_class=DAN, cell_type prefix 'PPL'), left+right pooled",
+      "level": "DAN",
+      "n_neurons": {"left": 12, "right": 12, "pooled": 24},
+      "max_rate_hz": 50.0,
+      "ignites_at_operating_rate": true,
+      "ignition_note": "PPL IGNITES at 150 Hz (74857-90012 total spikes) but is safe at 50 Hz (2623-3895 total spikes); max_rate capped at 50 Hz for this reason.",
+      "confidence": "MEDIUM",
+      "gating_effect_pct_dm_spikes": {"@150Hz_vs_baseline": "+170% to +277% (largest of all interoceptive candidates tested, but measured at the higher, igniting rate -- capped operating range at 50Hz is untested for gating, only for direct non-ignition)"},
+      "rationale": "PPL1 is the mushroom-body punishment/aversive DAN cluster -- the biologically apt choice for an aversive withdrawal state, and empirically the strongest interoceptive modulator found (at 150Hz, where it also ignites -- hence the conservative 50Hz cap)."
+    }
+  ],
+
+  "not_used_and_why": {
+    "endocrine_neurosecretory_cells": "IPC, DH44, DH31, CRZ, ITP, DMS, Hugin-RG, CAPA, mNSC/lNSC_unknown -- zero direct DN effect and no significant gating effect found (see headline_findings.endocrine_confirmed_dead). v1 used these for hunger/nicotine/withdrawal; v2 replaces them entirely with octopaminergic/DAN-PAM/DAN-PPL.",
+    "central_serotonergic": "Ignites the network at BOTH 50 and 150 Hz (183764-197338 total spikes) -- unusable at either screened rate.",
+    "ALPN_food_pool_and_smoke_pool": "Pooling the literature glomeruli DM1/DM2/DM4/VA2 (food) or DL5/V/DA2 (smoke) at ALPN level ignites in ALL 4 pooled candidates at both rates -- worse than any individual glomerulus. Individual small ALPN populations are weak but pooling several crosses the ignition threshold.",
+    "literal_ORN_or_ALPN_DM1_DM2_DM4_VA2_DL5_V": "None of the spec-suggested literal food/smoke glomeruli survived screening: at ORN level all ignite at rates as low as 1-2 Hz; at ALPN level DM1/DM2/DM4/VA2/DL5/V/V-glomerulus have too few uniglomerular PNs (1-2/side) to even qualify for the >=3/side screen threshold, except DA2 (used, see above)."
+  },
+
+  "encoder_design_decision": {
+    "bilateral_contrast_kept": true,
+    "reason": "Given that neither food_odor (DC4, LI~0.07-0.18) nor, to a lesser extent, smoke_odor (DA2, LI=+-1 but only 1 spiking DN) offer strong, information-rich lateralization, v1's bilateral-contrast encoder feature ((L-R)/(L+R+eps) driving a +gain/-gain differential onto the L/R anatomical groups) is KEPT UNCHANGED in v2. Visual (LC10e, LI=0.85-0.97) is the one channel where the anatomical population itself already carries strong directional information, but the contrast feature is kept for it too for consistency and because ES can always learn to down-weight it.",
+    "per_group_max_rate": "The 200.0 in v1's `200.0 * sigmoid(...)` encoder output is now a per-group vector (flyrl.io_neurons.GROUP_MAX_RATE_HZ) instead of one constant, set from the table above."
+  }
+}
