@@ -1,0 +1,21 @@
+.venv/
+.venv-body/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+browser-sim/
+eon-fly-brain/
+flybody/
+webgpu-fly/
+
+# large / regenerable outputs (checkpoints ARE tracked - they're tiny)
+results/train.log
+results/**/traj_*.npz
+renders/assets/reels/*.mp4
+renders/assets/reels/*.npz
+renders/assets/reels/*.webm
+renders/frames/
+*.pkl
+dev.log
+nohup.out

@@ -1,0 +1,5 @@
+# flybody is installed editable from ./flybody (see setup.sh), not pinned here.
+gymnasium==1.3.0
+imageio==2.37.4
+imageio-ffmpeg==0.6.0
+pillow==12.3.0
