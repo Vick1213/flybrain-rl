@@ -1,0 +1,101 @@
+{
+  "_comment": "Task 1 (io v3) decision. Uses the SAME empirical screen as v2 (scripts/screen_entry_points.py; no new simulation needed -- all three chosen VPN types were already screened at 50/150Hz in results/screen/candidate_summary.csv). Selection criterion: maximise |LI|, DN response magnitude, mirror consistency, and pairwise distinctness (low cosine similarity between the three chosen types' 150Hz DN response vectors), never igniting at the chosen max rate, one VPN type per directional source (food_odor, smoke_odor, reels_light), distinct from the already-kept reels_jackpot channel (MeTu1).",
+
+  "headline_findings": {
+    "olfactory_confirmed_unusable": "Reconfirms io_v2_choice.json: every ORN glomerulus ignites at rates as low as 1-2 Hz, and ALPN ignition onset is a chaotic RNG-history-dependent threshold effect (not reproducible run to run). v2 already had to accept a documented ignition risk for food_odor (ALPN DC4) and a very weak 1-DN signal for smoke_odor (ALPN DA2) because no better olfactory channel existed. v3 removes olfactory entry points entirely.",
+    "visual_projection_reliable": "All 69 visual_projection (VPN) types tested never ignite at 50 or 150 Hz (0/69), confirming io_v2's finding. Several are strongly and reproducibly lateralized.",
+    "LC10_family_is_one_redundant_pathway_not_five": "The most strongly-lateralized VPN types (LC10e LI=0.85-0.97, LC10c-1 LI=0.84, LC10d LI=0.78, LC10c-2 LI=0.75, LC10a LI=0.63) are members of the same 'looming/motion' LC10 family and are MUTUALLY highly correlated (same-side cosine similarity 0.6-0.95, e.g. LC10c-1 vs LC10c-2 = 0.91-0.95). Picking two or three of them for different sources would NOT satisfy the pairwise-distinctness requirement -- they would carry near-duplicate information despite superficially different cell-type labels. Only ONE LC10-family member can be used across the three directional channels.",
+    "best_non_LC10_non_MeTu1_channels": "Excluding the LC10 family (one slot reserved for reels_light) and MeTu1 (reserved for reels_jackpot, see below), the best remaining VPN candidates by |LI| with acceptable magnitude and mirror consistency are LPLC4 (|LI| 0.47-0.79, largest DN response magnitude of ANY candidate screened: 107-123 responsive DN/motor neurons, 1315-1466 total spikes @150Hz) and LPC2 (|LI| 0.62-0.68 @150Hz, weaker at 50Hz, mirror consistency 0.841). Both are markedly more distinct from LC10e and from each other than any two LC10-family members would be (max pairwise cosine among the final triplet = 0.47, vs 0.6-0.95 within the LC10 family).",
+    "tradeoff_disclosed": "LPLC4 and LPC2 have lower |LI| than LC10e/LC10c-1 (0.47-0.79 and 0.62-0.68 vs 0.85-0.97). This is an explicit, accepted trade-off of |LI| against pairwise distinctness, per the task's instruction to jointly maximise all four criteria -- fewer than three MUTUALLY-distinct, strongly-lateralized VPN types exist in this connectome; LPLC4/LPC2 are the best available compromise, not pooled duplicates of LC10e."
+  },
+
+  "final_groups": [
+    {
+      "obs_channel": "reels_light_L/R",
+      "population": "visual_projection LC10e",
+      "status": "UNCHANGED from v2",
+      "n_neurons": {"left": 52, "right": 51},
+      "max_rate_hz": 150.0,
+      "ignites_at_max_rate": false,
+      "LI_at_150Hz": {"left_stim": 0.846, "right_stim": 0.877},
+      "LI_at_50Hz": {"left_stim": 0.972, "right_stim": 0.933},
+      "dm_n_responsive_at_150Hz": {"left_stim": 45, "right_stim": 56},
+      "dm_spikes_total_at_150Hz": {"left_stim": 325.0, "right_stim": 325.0},
+      "mirror_consistency": 0.8616,
+      "rationale": "Best overall VPN channel found in either screen (highest |LI|, well-tested, high confidence); kept as the anchor for the LC10 family so no other LC10-type is used elsewhere (see LC10_family_is_one_redundant_pathway_not_five)."
+    },
+    {
+      "obs_channel": "food_odor_L/R",
+      "population": "visual_projection LPLC4",
+      "status": "NEW in v3 (replaces ALPN DC4)",
+      "n_neurons": {"left": 56, "right": 54},
+      "max_rate_hz": 150.0,
+      "ignites_at_max_rate": false,
+      "LI_at_150Hz": {"left_stim": 0.475, "right_stim": 0.584},
+      "LI_at_50Hz": {"left_stim": 0.604, "right_stim": 0.794},
+      "dm_n_responsive_at_150Hz": {"left_stim": 123, "right_stim": 107},
+      "dm_spikes_total_at_150Hz": {"left_stim": 1466.0, "right_stim": 1315.0},
+      "mirror_consistency": 0.8841,
+      "cosine_similarity_to_reels_light_LC10e": {"left": 0.301, "right": 0.416},
+      "cosine_similarity_to_reels_jackpot_MeTu1": {"left": 0.103, "right": 0.118},
+      "rationale": "Highest-magnitude non-LC10-family VPN channel screened (largest DN response of any candidate, named or generic), good mirror consistency, and the lowest combined cross-talk to LC10e+MeTu1 among magnitude-comparable candidates. Chosen over higher-|LI| LC10-family members (LC10c-1/c-2/d/a) specifically because those correlate 0.6-0.95 with LC10e (reels_light) and would fail pairwise distinctness."
+    },
+    {
+      "obs_channel": "smoke_odor_L/R",
+      "population": "visual_projection LPC2",
+      "status": "NEW in v3 (replaces ALPN DA2)",
+      "n_neurons": {"left": 54, "right": 62},
+      "max_rate_hz": 150.0,
+      "ignites_at_max_rate": false,
+      "LI_at_150Hz": {"left_stim": 0.683, "right_stim": 0.617},
+      "LI_at_50Hz": {"left_stim": 1.0, "right_stim": 0.727},
+      "note_50Hz": "LI=1.0 at 50Hz left-stim is an artifact of only 2 responsive DN neurons at that rate (near-silent operating point); the 150Hz numbers (18/16 responsive DNs) are the more meaningful magnitude estimate and the one used to justify this choice.",
+      "dm_n_responsive_at_150Hz": {"left_stim": 18, "right_stim": 16},
+      "dm_spikes_total_at_150Hz": {"left_stim": 120.0, "right_stim": 115.0},
+      "mirror_consistency": 0.8410,
+      "cosine_similarity_to_reels_light_LC10e": {"left": 0.339, "right": 0.383},
+      "cosine_similarity_to_reels_jackpot_MeTu1": {"left": 0.089, "right": 0.031},
+      "cosine_similarity_to_food_odor_LPLC4": {"left": 0.260, "right": 0.473},
+      "rationale": "Second-best-lateralized VPN type available after excluding the LC10 family and MeTu1, with good mirror consistency and low cross-talk to LC10e/MeTu1. The LPLC4-LPC2 right-side cosine similarity (0.473) is the highest pairwise correlation among the final triplet and is the one clearly imperfect distinctness number in this choice -- flagged explicitly rather than hidden, since no fully independent third strongly-lateralized VPN pathway was found in the screen (see tradeoff_disclosed)."
+    },
+    {
+      "obs_channel": "reels_jackpot",
+      "population": "visual_projection MeTu1, pooled left+right (unsplit)",
+      "status": "UNCHANGED from v2",
+      "n_neurons": {"pooled": 244},
+      "max_rate_hz": 150.0,
+      "note": "Kept exactly as v2 per the task spec. Confirmed distinct (cosine 0.03-0.22) from all three v3 directional channels above."
+    },
+    {
+      "obs_channel": "sugar_taste", "status": "UNCHANGED from v2 (21-neuron sugar GRN benchmark set)"
+    },
+    {
+      "obs_channel": "nicotine_taste", "status": "UNCHANGED from v2 (pooled bitter GRNs)"
+    },
+    {
+      "obs_channel": "hunger", "status": "UNCHANGED from v2 (pooled octopaminergic neurons)"
+    },
+    {
+      "obs_channel": "nicotine", "status": "UNCHANGED from v2 (pooled DAN PAM cluster)"
+    },
+    {
+      "obs_channel": "withdrawal", "status": "UNCHANGED from v2 (pooled DAN PPL cluster, capped at 50 Hz)"
+    }
+  ],
+
+  "pairwise_cosine_similarity_matrix_of_final_three_directional_channels": {
+    "note": "150Hz DN response vectors, same-side (L-L, R-R) cosine similarity from results/screen/cosine_similarity.csv",
+    "LC10e_vs_LPLC4": {"left": 0.301, "right": 0.416},
+    "LC10e_vs_LPC2": {"left": 0.339, "right": 0.383},
+    "LPLC4_vs_LPC2": {"left": 0.260, "right": 0.473},
+    "for_comparison_within_excluded_LC10_family": {
+      "LC10c-1_vs_LC10c-2": {"left": 0.95, "right": 0.91},
+      "LC10e_vs_LC10c-1": {"left": 0.76, "right": 0.57},
+      "note": "shown to justify why no second/third LC10-family member was chosen"
+    }
+  },
+
+  "obs_channel_names_unchanged": "As instructed, FlyAddictionEnv.obs_channels / flyrl.io_neurons.GROUP_NAMES are untouched (food_odor_L, smoke_odor_L, etc. keep their v1/v2 names); only the anatomical entry-point neurons underlying each name changed. This is documented in the flyrl/io_neurons.py module docstring.",
+
+  "readout_pools_and_z_norm": "Rebuilt via the unchanged v2 procedure (scripts/diag_readout.py), which re-derives the 48 named + 16 generic readout pools, z-normalization stats, and anatomical-prior turn-sign purely from the (now-v3) input groups -- no code change to diag_readout.py was needed, only a rerun after flyrl/io_neurons.py's group definitions changed. New cache written to flyrl/readout_neurons.npz (input group cache flyrl/io_neurons.npz was also rebuilt, group sizes: food_odor_L/R=56/54, smoke_odor_L/R=54/62, reels_light_L/R=52/51 -- exactly matching the screen's n_neurons_stim above)."
+}

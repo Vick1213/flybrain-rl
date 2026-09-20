@@ -12,17 +12,39 @@ v1 of this module used the coarser ``browser-sim/data/classification.csv.gz``
 table (only super_class/class/sub_class, no per-glomerulus or per-DN-type
 identity), which is what produced the "same bilateral response whichever
 side is stimulated" failure mode diagnosed in results/diag_readout.csv. v2
-(this version) uses the richer annotation table's cell_type/cell_sub_class/
-top_nt columns, and the specific anatomical populations it builds into each
-input group were chosen empirically by scripts/screen_entry_points.py -- see
-results/screen/io_v2_choice.json for the full justification.
+used the richer annotation table's cell_type/cell_sub_class/top_nt columns
+for interoceptive/taste/jackpot channels, but still routed food_odor/
+smoke_odor through olfactory ALPN glomeruli (DC4/DA2) -- see
+results/screen/io_v2_choice.json.
+
+v3 (this version, Task 1) replaces BOTH odour channels with visual-
+projection (VPN) channels too, so that ALL THREE directional sources
+(food, smoke, reels) now enter the brain through the same anatomical
+*class* of entry point. Rationale (see results/screen/io_v3_choice.json for
+the full data-backed justification): a wider re-screen confirmed that
+*every* ORN glomerulus ignites the whole network at rates as low as 1-2 Hz,
+and ALPN (projection-neuron) ignition is a chaotic, RNG-history-dependent
+threshold phenomenon that is not reproducible -- olfactory input is
+degenerate/unusable for steering in this connectome (odour identity and
+side are lost once the network ignites). visual_projection (VPN) types,
+by contrast, never ignite (0/69 types tested, both 50 and 150 Hz) and
+several are strongly and reproducibly lateralized. v3 therefore senses
+food_odor and smoke_odor -- despite their env-level names, which are kept
+unchanged as obs-channel identifiers only, see ``GROUP_NAMES`` -- through
+two more VPN cell types (LPLC4 for food, LPC2 for smoke), chosen to
+maximise |LI|, DN response magnitude, mirror consistency and pairwise
+distinctness from each other, from reels_light's existing LC10e channel,
+and from reels_jackpot's existing MeTu1 channel. Obs channel *names* are
+unchanged (they are defined by flyrl.addiction_env.FlyAddictionEnv and
+that file is not modified) -- only the anatomical entry-point neurons
+change.
 
 Two kinds of index sets are built:
 
   1. Anatomical INPUT groups, one per FlyAddictionEnv observation channel
      (see ``GROUP_NAMES`` == ``FlyAddictionEnv.obs_channels``), each a
-     specific empirically-chosen population (e.g. ALPN glomerulus DA2 for
-     smoke_odor, visual_projection LC10e for reels_light -- see
+     specific empirically-chosen population (e.g. visual_projection LPC2
+     for smoke_odor, visual_projection LC10e for reels_light -- see
      ``GROUP_MAX_RATE_HZ`` below and ``_build_groups_uncached``). Cached to
      ``flyrl/io_neurons.npz`` the first time they are built.
 
@@ -105,43 +127,54 @@ GROUP_NAMES = [
 ]
 
 # ---------------------------------------------------------------------
-# v2 anatomical entry-point choice (Task B), decided from the empirical
-# screen in scripts/screen_entry_points.py -- see
-# results/screen/io_v2_choice.json for the full data-backed justification,
+# v3 anatomical entry-point choice (Task 1), decided from the SAME
+# empirical screen used for v2 (scripts/screen_entry_points.py) -- see
+# results/screen/io_v3_choice.json for the full data-backed justification,
 # and results/screen/candidate_summary.csv / cosine_similarity.csv /
-# mirror_consistency.csv / gating.csv / gating_v2_visual_ref.csv for the
-# raw numbers. Headline reasoning (see io_v2_choice.json for detail):
-#   - EVERY ORN glomerulus ignites the whole network (>40k spikes/300ms)
-#     at rates as low as 1-2 Hz -- ORN input has no usable dynamic range.
-#   - Most ALPN (projection-neuron) glomeruli are chaotically bistable
-#     (ignition onset is not reproducible across RNG histories); only
-#     ALPN glomerulus DA2 was confirmed non-igniting across 4 independent
-#     trials spanning 1-150 Hz (weak signal, but the single reliable
-#     olfactory channel found) -- used for smoke_odor. ALPN DC4 is the
-#     best available SECOND olfactory channel (real DN response when
-#     sub-ignition) but carries a documented, unresolved ignition risk --
-#     used for food_odor with a conservative max rate.
-#   - visual_projection NEVER ignites (69/69 types, both rates) and
-#     several types are strongly, reproducibly lateralized (LC10e:
-#     LI=0.85-0.97) -- used for reels_light (LC10e) and reels_jackpot
-#     (MeTu1, pooled, anatomically distinct anterior-visual pathway).
-#   - Endocrine neurosecretory cells (v1's hunger/nicotine/withdrawal)
-#     give ZERO direct or gated DN effect -- replaced by octopaminergic
-#     (hunger), DAN PAM (nicotine) and DAN PPL (withdrawal), all three of
-#     which show real direct and/or gating effects on DN responsiveness.
+# mirror_consistency.csv for the raw numbers. Headline reasoning:
+#   - Olfactory input (ORN or ALPN, any glomerulus) is unusable for
+#     steering in this connectome: ORN ignites the whole network at rates
+#     as low as 1-2 Hz, and ALPN ignition onset is a chaotic/RNG-history-
+#     dependent threshold phenomenon (see io_v2_choice.json). v3 drops
+#     olfactory entry points entirely.
+#   - visual_projection (VPN) NEVER ignites (0/69 types, 50 or 150 Hz) and
+#     several types are strongly, reproducibly lateralized. v3 uses THREE
+#     different VPN types, one per directional source: LC10e (reels_light,
+#     unchanged from v2 -- the best-lateralized, best-established channel,
+#     LI=0.85-0.97), LPLC4 (food_odor -- new in v3, the highest-magnitude
+#     non-LC10-family VPN type with the lowest cross-talk to LC10e/MeTu1),
+#     LPC2 (smoke_odor -- new in v3, the next-best-lateralized
+#     non-LC10-family, non-MeTu1 VPN type). reels_jackpot keeps v2's MeTu1
+#     (pooled, unsplit -- the jackpot cue is a non-lateralized scalar).
+#     NOTE: every OTHER strongly-lateralized VPN type (LC10c-1/c-2/d/a/b)
+#     is a member of the same LC10 "looming" family as LC10e and is highly
+#     correlated with it (cosine similarity 0.6-0.95 same-side) -- these
+#     were excluded from consideration as food/smoke channels precisely
+#     because they would not be pairwise-distinct from reels_light. LPLC4
+#     and LPC2 have lower |LI| than the LC10 family (0.47-0.79 and
+#     0.62-0.68 respectively, vs LC10e's 0.85-0.97) but are the best
+#     available trade-off against distinctness -- see io_v3_choice.json.
+#   - Taste/jackpot/interoceptive channels are UNCHANGED from v2: sugar
+#     GRNs (sugar_taste), pooled bitter GRNs (nicotine_taste), pooled
+#     MeTu1 (reels_jackpot), octopaminergic (hunger), DAN PAM (nicotine),
+#     DAN PPL @<=50Hz (withdrawal) -- see io_v2_choice.json for their
+#     original justification, unaffected by the v3 odour->VPN change.
 GROUP_MAX_RATE_HZ = {
-    "food_odor_L": 20.0, "food_odor_R": 20.0,      # ALPN DC4 -- conservative, ignition risk documented
-    "smoke_odor_L": 150.0, "smoke_odor_R": 150.0,  # ALPN DA2 -- confirmed non-igniting 1-150 Hz
-    "reels_light_L": 150.0, "reels_light_R": 150.0,  # visual_projection LC10e -- never ignites
-    "sugar_taste": 200.0,     # unchanged from v1 / eon-fly-brain benchmark.py 'sugar' experiment
-    "nicotine_taste": 150.0,  # pooled bitter GRNs
-    "reels_jackpot": 150.0,   # visual_projection MeTu1, pooled
-    "hunger": 150.0,          # octopaminergic, pooled
-    "nicotine": 150.0,        # DAN PAM, pooled
-    "withdrawal": 50.0,       # DAN PPL -- ignites at 150 Hz, capped
+    "food_odor_L": 150.0, "food_odor_R": 150.0,      # v3: visual_projection LPLC4 -- never ignites
+    "smoke_odor_L": 150.0, "smoke_odor_R": 150.0,    # v3: visual_projection LPC2 -- never ignites
+    "reels_light_L": 150.0, "reels_light_R": 150.0,  # visual_projection LC10e -- never ignites (unchanged)
+    "sugar_taste": 200.0,     # unchanged from v1/v2 / eon-fly-brain benchmark.py 'sugar' experiment
+    "nicotine_taste": 150.0,  # pooled bitter GRNs (unchanged from v2)
+    "reels_jackpot": 150.0,   # visual_projection MeTu1, pooled (unchanged from v2)
+    "hunger": 150.0,          # octopaminergic, pooled (unchanged from v2)
+    "nicotine": 150.0,        # DAN PAM, pooled (unchanged from v2)
+    "withdrawal": 50.0,       # DAN PPL -- ignites at 150 Hz, capped (unchanged from v2)
 }
 
 
+# Kept for reference/tests -- v2 used this to build the food_odor/smoke_odor
+# ALPN groups (DC4/DA2); v3 no longer calls it (see _build_groups_uncached
+# below), since io_v3_choice.json found olfactory input unusable.
 def _alpn_uniglomerular_ids(df: pd.DataFrame, glomerulus: str, side: str) -> list:
     alpn = df[(df["cell_class"] == "ALPN") & (df["cell_sub_class"] == "uniglomerular")
               & df["cell_type"].notna()]
@@ -158,23 +191,26 @@ def _visual_type_ids(df: pd.DataFrame, cell_type: str, side: str = None) -> list
 
 
 def _build_groups_uncached(fb) -> dict:
-    """v2 anatomical input groups -- see GROUP_MAX_RATE_HZ docstring above
-    and results/screen/io_v2_choice.json for the full justification."""
+    """v3 anatomical input groups -- see GROUP_MAX_RATE_HZ docstring above
+    and results/screen/io_v3_choice.json for the full justification."""
     df = load_annotations()
     f2i = fb.flyid_to_index
 
     def idx(ids):
         return local_indices_for_root_ids(fb, ids)
 
-    # food_odor: ALPN glomerulus DC4 (best available 2nd olfactory channel)
-    food_L = idx(_alpn_uniglomerular_ids(df, "DC4", "left"))
-    food_R = idx(_alpn_uniglomerular_ids(df, "DC4", "right"))
+    # food_odor: v3 -- visual_projection LPLC4 (odour is degenerate in this
+    # model; LPLC4 is the highest-magnitude VPN type distinct from both
+    # LC10e (reels_light) and MeTu1 (reels_jackpot); see io_v3_choice.json)
+    food_L = idx(_visual_type_ids(df, "LPLC4", "left"))
+    food_R = idx(_visual_type_ids(df, "LPLC4", "right"))
 
-    # smoke_odor: ALPN glomerulus DA2 (the one robust, non-igniting olfactory channel)
-    smoke_L = idx(_alpn_uniglomerular_ids(df, "DA2", "left"))
-    smoke_R = idx(_alpn_uniglomerular_ids(df, "DA2", "right"))
+    # smoke_odor: v3 -- visual_projection LPC2 (next-best-lateralized VPN
+    # type distinct from LC10e/MeTu1/LPLC4; see io_v3_choice.json)
+    smoke_L = idx(_visual_type_ids(df, "LPC2", "left"))
+    smoke_R = idx(_visual_type_ids(df, "LPC2", "right"))
 
-    # reels_light: visual_projection LC10e (strongly lateralized, never ignites)
+    # reels_light: visual_projection LC10e (strongly lateralized, never ignites; unchanged from v2)
     reels_L = idx(_visual_type_ids(df, "LC10e", "left"))
     reels_R = idx(_visual_type_ids(df, "LC10e", "right"))
 

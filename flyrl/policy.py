@@ -61,6 +61,16 @@ DEFAULT_INIT_SCALE = 0.3
 
 TAU_TRACE_MS = 50.0
 
+# Task 2 (DAgger, flyrl.dagger_taxis) latency ablation: an OPTIONAL second,
+# slower leaky trace over the same readout spikes, maintained alongside the
+# tau=50ms trace above at negligible extra cost (one more elementwise
+# multiply-add per sub-step). It is exposed (raw, unnormalized) via
+# BrainPolicy.last_pooled_slow_raw purely for flyrl.dagger_taxis's own
+# "does a slower trace help decodability" experiment -- it never feeds
+# BrainPolicy.act()'s own decoder output (which is unchanged: still the
+# single tau=50ms z-normalized 64-pool feature vector, exactly as v2/v3).
+TAU_TRACE_SLOW_MS = 200.0
+
 # Per-group encoder output ceiling in Hz (the "200" in v1's uniform
 # `200.0 * sigmoid(...)`), now per-anatomical-group and decided empirically
 # by the Task A screen (see flyrl.io_neurons.GROUP_MAX_RATE_HZ /
@@ -202,6 +212,9 @@ class BrainPolicy:
 
         # Leaky trace (tau=50ms) decay per dt sub-step.
         self.decay = float(np.exp(-self.dt / TAU_TRACE_MS))
+        # Task 2: optional second, slower trace (tau=200ms) -- see
+        # TAU_TRACE_SLOW_MS docstring above.
+        self.decay_slow = float(np.exp(-self.dt / TAU_TRACE_SLOW_MS))
 
         self.theta = None
         self.W_enc = self.b_enc = self.W_dec = self.b_dec = None
@@ -233,7 +246,11 @@ class BrainPolicy:
         """Reset brain state and readout trace at episode start."""
         self.fb.reset()
         self.trace = torch.zeros((self.batch, self.n_readout), dtype=torch.float32, device=self.device)
+        self.trace_slow = torch.zeros((self.batch, self.n_readout), dtype=torch.float32, device=self.device)
         self.last_dan_rate_hz = torch.zeros((self.batch,), dtype=torch.float32, device=self.device)
+        self.last_pooled = torch.zeros((self.batch, N_POOLS), dtype=torch.float32, device=self.device)
+        self.last_pooled_raw = torch.zeros((self.batch, N_POOLS), dtype=torch.float32, device=self.device)
+        self.last_pooled_slow_raw = torch.zeros((self.batch, N_POOLS), dtype=torch.float32, device=self.device)
 
     # ------------------------------------------------------------------
     def _encode(self, obs_t: torch.Tensor) -> torch.Tensor:
@@ -273,6 +290,7 @@ class BrainPolicy:
             spike_f = spike.to(torch.float32)
             readout_spikes = spike_f.index_select(1, self.readout_idx)  # (B, n_readout)
             self.trace = self.trace * self.decay + readout_spikes
+            self.trace_slow = self.trace_slow * self.decay_slow + readout_spikes  # Task 2 ablation only
             dan_spike_sum += spike_f.index_select(1, self.dan_idx).sum(dim=1)
 
         window_s = self.steps_per_action * self.dt / 1000.0
@@ -282,11 +300,36 @@ class BrainPolicy:
         pooled.index_add_(1, self.pool_assign, self.trace)  # (B, 64) raw per-pool trace sum
         # v2: fixed z-normalization from the screen (spec), replacing v1's
         # /pool_counts/trace_norm_const heuristic normalization.
-        pooled = (pooled - self.pool_mean.unsqueeze(0)) / self.pool_std.unsqueeze(0)
+        pooled_normed = (pooled - self.pool_mean.unsqueeze(0)) / self.pool_std.unsqueeze(0)
 
-        pre_dec = torch.einsum("bof,bf->bo", self.W_dec, pooled) + self.b_dec  # (B, 2)
+        # Task 2 (flyrl.dagger_taxis): expose the raw and z-normed tau=50ms
+        # pooled features (the decoder's actual input) plus the raw tau=200ms
+        # pooled features, purely for the DAgger ridge-regression pipeline's
+        # own feature extraction / latency ablation. None of this feeds back
+        # into this method's own action output below.
+        self.last_pooled = pooled_normed
+        self.last_pooled_raw = pooled
+        pooled_slow_raw = torch.zeros((self.batch, N_POOLS), dtype=torch.float32, device=self.device)
+        pooled_slow_raw.index_add_(1, self.pool_assign, self.trace_slow)
+        self.last_pooled_slow_raw = pooled_slow_raw
+
+        pre_dec = torch.einsum("bof,bf->bo", self.W_dec, pooled_normed) + self.b_dec  # (B, 2)
         action = torch.tanh(pre_dec)
         return action.cpu().numpy()
+
+    def features(self) -> np.ndarray:
+        """(B, 64) z-normalized pooled readout features from the most recent
+        act() call -- i.e. exactly what BrainPolicy.act() feeds its own
+        decoder. Used by flyrl.dagger_taxis to fit an external ridge-
+        regression decoder onto the same features BrainPolicy.set_params'
+        decoder block would consume (Task 2)."""
+        return self.last_pooled.cpu().numpy()
+
+    def features_slow_raw(self) -> np.ndarray:
+        """(B, 64) RAW (not z-normalized -- no screen stats exist for this
+        trace) tau=200ms pooled features from the most recent act() call.
+        Task 2 latency-ablation use only."""
+        return self.last_pooled_slow_raw.cpu().numpy()
 
     def mean_dan_rate_hz(self) -> np.ndarray:
         """Per-batch-row mean DAN firing rate (Hz), computed over the most
