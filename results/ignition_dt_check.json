@@ -1,0 +1,61 @@
+{
+ "sim_ms": 300,
+ "side": "left",
+ "results": {
+  "ORN_DM1@5Hz": {
+   "n_stimulated": 35,
+   "dt_0.1": {
+    "total_spikes": 121147,
+    "active_neurons": 8105
+   },
+   "dt_0.5": {
+    "total_spikes": 123958,
+    "active_neurons": 8420
+   }
+  },
+  "ORN_DM1@50Hz": {
+   "n_stimulated": 35,
+   "dt_0.1": {
+    "total_spikes": 129747,
+    "active_neurons": 8117
+   },
+   "dt_0.5": {
+    "total_spikes": 137438,
+    "active_neurons": 8618
+   }
+  },
+  "ORN_DA1@20Hz": {
+   "n_stimulated": 60,
+   "dt_0.1": {
+    "total_spikes": 119164,
+    "active_neurons": 8118
+   },
+   "dt_0.5": {
+    "total_spikes": 119541,
+    "active_neurons": 8375
+   }
+  },
+  "LC10e@150Hz": {
+   "n_stimulated": 52,
+   "dt_0.1": {
+    "total_spikes": 3359,
+    "active_neurons": 202
+   },
+   "dt_0.5": {
+    "total_spikes": 3512,
+    "active_neurons": 196
+   }
+  },
+  "LPLC4@150Hz": {
+   "n_stimulated": 56,
+   "dt_0.1": {
+    "total_spikes": 10106,
+    "active_neurons": 749
+   },
+   "dt_0.5": {
+    "total_spikes": 9843,
+    "active_neurons": 745
+   }
+  }
+ }
+}
