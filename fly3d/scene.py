@@ -127,6 +127,15 @@ def triangle(phase01: float) -> float:
     return 1.0 - abs(2.0 * p - 1.0)
 
 
+def smoothstep(x: float) -> float:
+    """Cubic ease 0 -> 1 over x in [0, 1], with zero velocity at both ends
+    -- used to ease acceleration/deceleration of staged trajectories so
+    walks start/stop smoothly instead of snapping to a constant speed.
+    """
+    x = float(np.clip(x, 0.0, 1.0))
+    return x * x * (3.0 - 2.0 * x)
+
+
 # --------------------------------------------------------------------------
 # Loading flyrl modules without importing the real `flyrl` package
 # (flyrl/__init__.py pulls in fastbrain.py, which needs torch; torch is
@@ -604,6 +613,7 @@ ACTIVITY_LABELS = {
     "food": "eating",
     "smoke": "smoking",
     "reels": "scrolling reels",
+    "snub": "ignoring food",
 }
 
 
@@ -818,8 +828,10 @@ class AddictionScene3D:
         d.qpos[self._qadr["haustellum"]] = -0.5 * max(0.0, -rostrum)
         d.qpos[self._qadr["labrum_left"]] = 0.5 * max(0.0, -rostrum)
         d.qpos[self._qadr["labrum_right"]] = 0.5 * max(0.0, -rostrum)
-        # tilt head down slightly toward whatever it's using
-        d.qpos[self._qadr["head"]] = -0.15 if at in ("food", "smoke") else 0.0
+        # tilt head down slightly toward whatever it's using -- "snub" gets
+        # the same small dip as an actual "considering it" cue, even
+        # though (unlike "food") it never extends the rostrum.
+        d.qpos[self._qadr["head"]] = -0.15 if at in ("food", "smoke", "snub") else 0.0
 
     def _update_swipe(self, t: float, at: Optional[str]):
         d = self.d
@@ -1059,7 +1071,7 @@ class AddictionScene3D:
                 return cam_pos, center, (0.0, 0.0, 1.0)
 
             prop_point = None
-            if self._at == "food":
+            if self._at in ("food", "snub"):
                 prop_point = self.ids.food_world
             head = self._head_world()
             if prop_point is not None:
@@ -1138,16 +1150,21 @@ class AddictionScene3D:
     _last_tolerance = 0.0
 
     # ------------------------------------------------------------------
-    def _draw_caption(self, img: np.ndarray, title: Optional[str]) -> np.ndarray:
+    def _draw_caption(self, img: np.ndarray, title: Optional[str],
+                      subtitle: Optional[str] = None) -> np.ndarray:
         """Draws a small two-line caption centred at the bottom of the
         frame: `title` (e.g. "ADDICTED FLY -- trained on hijacked dopamine
-        signal") plus a fixed connectome-provenance line underneath it.
-        Positioned bottom-centre -- clear of the HUD panel, which is
-        top-left -- so the two never overlap. No-op if `title` is falsy.
+        signal") plus a `subtitle` line underneath it (defaults to the
+        fixed connectome-provenance line used by the brain-driven renders;
+        pass an explicit `subtitle` for other provenance, e.g. the staged
+        hand-choreographed demos). Positioned bottom-centre -- clear of the
+        HUD panel, which is top-left -- so the two never overlap. No-op if
+        `title` is falsy.
         """
         if not title:
             return img
-        subtitle = "steered by a frozen FlyWire connectome (138,639 neurons)"
+        if subtitle is None:
+            subtitle = "steered by a frozen FlyWire connectome (138,639 neurons)"
         im = Image.fromarray(img).convert("RGBA")
         overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
@@ -1509,13 +1526,255 @@ def render_staged_stills(out_dir: str = "renders", scene: Optional["AddictionSce
 
 
 # --------------------------------------------------------------------------
+# Staged "skip food" demo: a fully choreographed (non-policy) trajectory
+# where the fly's route runs right by the food, it slows to consider the
+# droplet and walks on without eating, then smokes a cigarette and scrolls
+# reels on a phone. Unlike `render_staged_demo` (whose per-segment heading
+# is defined independently per activity and can jump at a beat boundary),
+# every interval here carries an explicit (heading0 -> heading1) pair that
+# `_skip_food_state_at` eases continuously, so reorientation always either
+# (a) happens while the fly is walking, with heading held exactly equal to
+# the walk's own direction of travel (so the body never faces away from
+# where it's actually moving -- no "sliding"), or (b) happens while the
+# fly is stationary, turning in place between two walks/activities whose
+# directions differ. See `_skip_food_layout`/`_skip_food_segments` for how
+# the two "no-turn-needed" cases (the walk up to the food, and the walk up
+# to the cigarette) are arranged geometrically so they don't need (b).
+# --------------------------------------------------------------------------
+
+BODY_LEN_ENV = 1.0 / ARENA_BODY_LENGTHS  # env units per fly body-length
+
+# start/food/cigarette are laid out exactly colinear through the arena
+# centre: `cigarette_pose` always orients the prop so its filter faces
+# *outward* along the (centre -> smoke_xy) bearing (see its docstring), so
+# placing the walk's start point on the opposite side of centre from the
+# cigarette makes the fly's whole approach heading equal that same outward
+# bearing -- it arrives already facing the filter, no turn-in-place needed.
+_SKIP_PATH_ANGLE = math.radians(-28.0)   # bearing, start -> centre -> cigarette
+_SKIP_R_START = 0.36                     # env units, centre -> start
+_SKIP_R_CIG = 0.34                       # env units, centre -> cigarette (== filter position)
+_SKIP_FOOD_FRAC = 0.42                   # fraction of the start->cig walk where food sits
+_SKIP_FOOD_OFFSET_BL = 1.5               # body lengths, food's perpendicular offset off that line
+_SKIP_PASS_FRAC = 0.88                   # fraction of start->cig walk for the "walked past" waypoint
+_SKIP_TURN_FRACTION = 0.35               # how much of the full look-at-food angle the snub glance uses
+_SKIP_REELS_OFFSET_ANGLE = math.radians(105.0)  # phone bearing off the cigarette, relative to the path
+_SKIP_REELS_DIST = 0.20                  # env units, cigarette -> phone ("a short walk")
+
+_SKIP_HUNGER_T_MAX = 22.0   # seconds: hunger (already high) reaches 1.0 by here, then holds maxed
+_SKIP_NIC_PEAK = 0.95
+_SKIP_NIC_DECAY = 0.12      # per second, once smoking ends (nicotine "decays" through the reels beat)
+_SKIP_TOL_BASE = 0.08
+_SKIP_TOL_CLIMB = 0.10      # per second, while smoking ("tolerance starts climbing", then stays high)
+
+
+def _skip_food_layout():
+    center = np.array([0.5, 0.5])
+    path_dir = np.array([math.cos(_SKIP_PATH_ANGLE), math.sin(_SKIP_PATH_ANGLE)])
+    perp = np.array([-path_dir[1], path_dir[0]])
+    start = center - path_dir * _SKIP_R_START
+    cig_src = center + path_dir * _SKIP_R_CIG
+    path_len = float(np.linalg.norm(cig_src - start))
+    p1 = start + path_dir * (path_len * _SKIP_FOOD_FRAC)          # where the fly pauses to snub
+    food_xy = p1 + perp * (_SKIP_FOOD_OFFSET_BL * BODY_LEN_ENV)   # the droplet itself, just off the path
+    m_xy = start + path_dir * (path_len * _SKIP_PASS_FRAC)        # waypoint after walking past the food
+    reels_angle = _SKIP_PATH_ANGLE + _SKIP_REELS_OFFSET_ANGLE
+    reels_src = cig_src + np.array([math.cos(reels_angle), math.sin(reels_angle)]) * _SKIP_REELS_DIST
+    return dict(start=start, cig_src=cig_src, p1=p1, food_xy=food_xy, m_xy=m_xy,
+               reels_src=reels_src, path_heading=_SKIP_PATH_ANGLE)
+
+
+def _skip_food_segments(scene: "AddictionScene3D"):
+    """Builds the ordered list of choreographed intervals. Must be called
+    after `scene.set_sources(...)` (uses `_smoke_face_stand`/`_approach`,
+    which read the just-updated prop world frames off `scene.ids`).
+    """
+    L = _skip_food_layout()
+    start, p1, m_xy, food_xy = L["start"], L["p1"], L["m_xy"], L["food_xy"]
+    path_heading = L["path_heading"]
+
+    smoke_stand, smoke_heading = _smoke_face_stand(scene)
+    smoke_stand = np.asarray(smoke_stand, dtype=np.float64)
+
+    reels_stand, reels_heading = _approach(L["reels_src"], smoke_stand)
+    reels_stand = np.asarray(reels_stand, dtype=np.float64)
+
+    food_heading = math.atan2(food_xy[1] - p1[1], food_xy[0] - p1[0])
+    wiggle_delta = _wrap_angle(food_heading - path_heading) * _SKIP_TURN_FRACTION
+
+    segs = []
+    t = 0.0
+
+    def add(dur, pos0, pos1, h0, h1, at, camera, **extra):
+        nonlocal t
+        segs.append(dict(t0=t, t1=t + dur, pos0=np.asarray(pos0, dtype=np.float64),
+                         pos1=np.asarray(pos1, dtype=np.float64), heading0=h0, heading1=h1,
+                         at=at, camera=camera, **extra))
+        t += dur
+
+    # 1: wide establishing shot -- arena, all three props, fly parked at the start.
+    add(3.0, start, start, path_heading, path_heading, None, "top")
+    # 2: walk toward the food (eased accel/decel; heading == direction of travel throughout).
+    add(2.0, start, p1, path_heading, path_heading, None, "closeup")
+    # slow beside the droplet, pause, glance toward it and back (no proboscis, at stays "snub").
+    add(1.0, p1, p1, path_heading, path_heading, "snub", "closeup", wiggle=wiggle_delta)
+    # walk on past the food, without eating.
+    add(1.6, p1, m_xy, path_heading, path_heading, None, "closeup")
+    # 3: continue to the cigarette (arrives already facing the filter -- see module note above).
+    add(1.2, m_xy, smoke_stand, path_heading, path_heading, None, "closeup")
+    add(0.6, smoke_stand, smoke_stand, path_heading, smoke_heading, None, "closeup")
+    add(6.0, smoke_stand, smoke_stand, smoke_heading, smoke_heading, "smoke", "closeup")
+    # 4: turn in place, then walk to the phone.
+    add(0.8, smoke_stand, smoke_stand, smoke_heading, reels_heading, None, "closeup")
+    add(3.0, smoke_stand, reels_stand, reels_heading, reels_heading, None, "closeup")
+    # 5: scroll reels, over-the-shoulder framing, at least two jackpots.
+    add(8.0, reels_stand, reels_stand, reels_heading, reels_heading, "reels", "closeup",
+        jackpots=[t + 2.1, t + 5.6])
+    # 6: cut to a final wide shot -- fly at the phone, untouched food back in frame.
+    add(2.0, reels_stand, reels_stand, reels_heading, reels_heading, None, "top")
+
+    return segs
+
+
+def _skip_food_state_at(segs, t: float):
+    """Returns (state_dict, camera_name) for time `t` -- `state_dict` is
+    ready to pass as `scene.set_state(**state_dict)`.
+    """
+    t = float(np.clip(t, 0.0, segs[-1]["t1"]))
+    seg = segs[-1]
+    for s in segs:
+        if s["t0"] <= t <= s["t1"]:
+            seg = s
+            break
+    span = max(1e-6, seg["t1"] - seg["t0"])
+    frac = float(np.clip((t - seg["t0"]) / span, 0.0, 1.0))
+    ease = smoothstep(frac)
+
+    xy = seg["pos0"] + (seg["pos1"] - seg["pos0"]) * ease
+    dh = _wrap_angle(seg["heading1"] - seg["heading0"])
+    heading = seg["heading0"] + dh * ease
+    if "wiggle" in seg:
+        heading += seg["wiggle"] * hump(frac)   # smooth glance toward the food and back
+    heading = _wrap_angle(heading)
+
+    at = seg["at"]
+
+    hunger = float(np.clip(0.8 + 0.2 * (t / _SKIP_HUNGER_T_MAX), 0.0, 1.0))
+
+    smoke_seg = next(s for s in segs if s["at"] == "smoke")
+    t_smoke0, t_smoke1 = smoke_seg["t0"], smoke_seg["t1"]
+    if t <= t_smoke0:
+        nicotine = 0.0
+    elif t <= t_smoke1:
+        nicotine = _SKIP_NIC_PEAK * smoothstep((t - t_smoke0) / max(1e-6, t_smoke1 - t_smoke0))
+    else:
+        nicotine = _SKIP_NIC_PEAK * math.exp(-_SKIP_NIC_DECAY * (t - t_smoke1))
+
+    if t <= t_smoke0:
+        tolerance = _SKIP_TOL_BASE
+    elif t <= t_smoke1:
+        tolerance = _SKIP_TOL_BASE + _SKIP_TOL_CLIMB * (t - t_smoke0)
+    else:
+        tolerance = _SKIP_TOL_BASE + _SKIP_TOL_CLIMB * (t_smoke1 - t_smoke0)
+
+    jackpot = any(jt <= t < jt + 0.05 for jt in seg.get("jackpots", []))
+
+    state = dict(x=xy[0], y=xy[1], heading=heading, at=at, hunger=hunger,
+                nicotine=nicotine, tolerance=tolerance, jackpot=jackpot, t=t)
+    return state, seg["camera"]
+
+
+_SKIP_FOOD_CAPTION_TITLE = "Skips food. Smokes. Scrolls reels."
+_SKIP_FOOD_CAPTION_SUBTITLE = "staged animation — flybody MuJoCo model"
+
+
+def render_staged_skip_food(out: str = "renders/staged_skip_food.mp4", fps: int = 30,
+                            scene: Optional["AddictionScene3D"] = None):
+    """~29s hand-choreographed clip: the fly's walk to the cigarette runs
+    right by the food; it slows, pauses, glances at the droplet and walks
+    on without eating -- then smokes and scrolls reels. Staged/scripted,
+    not driven by the 2D env or any policy.
+    """
+    import imageio
+
+    if scene is None:
+        scene = AddictionScene3D()
+    L = _skip_food_layout()
+    scene.set_sources(L["food_xy"], L["cig_src"], L["reels_src"])
+    segs = _skip_food_segments(scene)
+    total_t = segs[-1]["t1"]
+
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    writer = imageio.get_writer(out, fps=fps, codec="libx264",
+                                quality=None, bitrate=None, macro_block_size=1,
+                                output_params=["-pix_fmt", "yuv420p", "-crf", "20"])
+    n = int(total_t * fps)
+    try:
+        for i in range(n + 1):
+            t = i / fps
+            st, camera = _skip_food_state_at(segs, t)
+            scene.set_state(**st)
+            frame = scene.render(camera=camera)
+            frame = scene._draw_caption(frame, _SKIP_FOOD_CAPTION_TITLE,
+                                        subtitle=_SKIP_FOOD_CAPTION_SUBTITLE)
+            writer.append_data(frame)
+    finally:
+        writer.close()
+    return {"out": out, "n_frames": n + 1, "duration_s": total_t}
+
+
+def render_skip_food_stills(out_dir: str = "renders", scene: Optional["AddictionScene3D"] = None):
+    """Renders staged_skip_food_snub.png / _smoke.png / _reels.png by
+    stepping the same choreography used by `render_staged_skip_food` at
+    fine resolution and grabbing a frame at each chosen moment.
+    """
+    if scene is None:
+        scene = AddictionScene3D()
+    L = _skip_food_layout()
+    scene.set_sources(L["food_xy"], L["cig_src"], L["reels_src"])
+    segs = _skip_food_segments(scene)
+
+    snub_seg = next(s for s in segs if s["at"] == "snub")
+    smoke_seg = next(s for s in segs if s["at"] == "smoke")
+    reels_seg = next(s for s in segs if s["at"] == "reels")
+
+    targets = {
+        round(snub_seg["t0"] + 0.5 * (snub_seg["t1"] - snub_seg["t0"]), 3):
+            ("staged_skip_food_snub.png", "closeup"),
+        round(smoke_seg["t0"] + 0.85, 3):    # just past an exhale trigger
+            ("staged_skip_food_smoke.png", "closeup"),
+        round(reels_seg["t0"] + 2.15, 3):    # right around the first jackpot
+            ("staged_skip_food_reels.png", "closeup"),
+    }
+    fine_fps = 60
+    total_t = max(targets.keys()) + 0.02
+    n = int(total_t * fine_fps)
+    os.makedirs(out_dir, exist_ok=True)
+    saved = {}
+    for i in range(n + 1):
+        t = i / fine_fps
+        st, _ = _skip_food_state_at(segs, t)
+        scene.set_state(**st)
+        for target_t, (fname, cam) in targets.items():
+            if fname in saved:
+                continue
+            if abs(t - target_t) <= 0.5 / fine_fps:
+                img = scene.render(camera=cam)
+                path = os.path.join(out_dir, fname)
+                Image.fromarray(img).save(path)
+                saved[fname] = path
+    return saved
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
 def _main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["stills", "demo", "episode", "traj", "all"], default="all")
+    parser.add_argument("--mode",
+                        choices=["stills", "demo", "episode", "traj", "skip_food", "all"],
+                        default="all")
     parser.add_argument("--policy", default="greedy")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out-dir", default="renders")
@@ -1550,6 +1809,12 @@ def _main():
                                  frames_per_step=args.frames_per_step, title=args.title,
                                  max_seconds=args.max_seconds)
         print("trajectory:", info)
+    if args.mode == "skip_food":
+        stills = render_skip_food_stills(out_dir=args.out_dir)
+        print("skip_food stills:", stills)
+        info = render_staged_skip_food(out=os.path.join(args.out_dir, "staged_skip_food.mp4"),
+                                       fps=args.fps)
+        print("skip_food demo:", info)
 
 
 if __name__ == "__main__":
