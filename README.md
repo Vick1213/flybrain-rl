@@ -26,7 +26,7 @@ no trained addicted fly yet.
 | `flyrl/fastbrain.py` | Event-driven reimplementation of the reference LIF model (`eon-fly-brain/code/run_pytorch.py`). Bit-exact vs. the reference at dt=0.1 ms on a 1000-step sugar-GRN test. Measured on an Apple M5 Pro CPU: reference 264 s wall-clock per simulated second; FastBrain 2.2 s (batch 32, dt 0.1 ms) and 0.45 s (batch 32, dt 0.5 ms) per simulated second per brain. |
 | `flyrl/addiction_env.py` | Gymnasium environment, 12 observation channels (bilateral odor/light + interoceptive signals). Scripted-baseline mean return over 20 seeds: Forager +17.8, Smoker -83.7, Reels -5.7, Greedy -37.4. |
 | `flyrl/scripted.py` | Hand-written klinotaxis policies used to sanity-check the environment's reward tuning and produce the baseline table above. |
-| `fly3d/` | MuJoCo (`flybody`) 3D renderer for the fly body. Coming in a later commit. |
+| `fly3d/`, `view3d.py` | 3D visualisation using the `flybody` MuJoCo fly model: replays an episode in an arena with a sugar droplet, a lit cigarette (smoke wisps, ember) and a phone playing real video as a live texture. The body animation is kinematic/procedural (tripod gait, proboscis, foreleg swipe), not physics- or brain-driven. Currently driven by the scripted policies; see `renders/` for stills and videos. The phone clips are free-licence Mixkit stock footage and are not redistributed here: fetch them with the URLs in `renders/assets/reels/SOURCES.md` (or drop any `*.mp4` into that folder). Render with `MUJOCO_GL=glfw .venv-body/bin/python -m fly3d.scene --mode all --policy greedy --seed 0`. |
 | `flyrl/policy.py`, `flyrl/train_es.py` | Policy network and ES trainer that will drive the connectome model on the addiction env. Being reworked (see Status). |
 
 ## Design idea
