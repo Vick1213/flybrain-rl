@@ -79,7 +79,7 @@ import torch
 
 from flyrl.addiction_env import VecFlyAddictionEnv, addiction_metrics
 from flyrl.policy import (
-    BrainPolicy, default_params, N_PARAMS, N_STEER_PARAMS,
+    BrainPolicy, default_params, N_PARAMS, N_STEER_PARAMS, N_ENC_PARAMS,
     steering_param_names, unpack_steering_params, steering_param_sigma_vector,
 )
 from flyrl.taxis import MODALITIES, run_taxis_generation
@@ -176,6 +176,24 @@ def run_episode_batch(policy: BrainPolicy, vec_env: VecFlyAddictionEnv, theta_po
                           mean_dan_rate=mean_dan_rate, mean_dan_rate_driven=mean_dan_rate_driven)
 
 
+def _average_episode_results(results: list) -> EpisodeResult:
+    """Task D(iii): average several EpisodeResults (same population, SAME
+    theta_pop, DIFFERENT common-random-number env seeds) into one, by
+    averaging fitness/welfare/DAN rates elementwise per population member
+    and averaging each addiction_metrics key per member across seeds."""
+    fitness = np.mean([r.fitness for r in results], axis=0)
+    welfare = np.mean([r.welfare for r in results], axis=0)
+    mean_dan_rate = np.mean([r.mean_dan_rate for r in results], axis=0)
+    mean_dan_rate_driven = np.mean([r.mean_dan_rate_driven for r in results], axis=0)
+    B = fitness.shape[0]
+    metrics = [
+        {k: float(np.mean([r.metrics[i][k] for r in results])) for k in METRIC_KEYS}
+        for i in range(B)
+    ]
+    return EpisodeResult(fitness=fitness, welfare=welfare, metrics=metrics,
+                          mean_dan_rate=mean_dan_rate, mean_dan_rate_driven=mean_dan_rate_driven)
+
+
 # ---------------------------------------------------------------------
 # ES machinery
 # ---------------------------------------------------------------------
@@ -195,11 +213,25 @@ def es_gradient(eps_half: np.ndarray, fitness: np.ndarray, sigma) -> np.ndarray:
     steering-encoder params get a larger sigma than the rest -- see
     flyrl.policy.steering_param_sigma_vector) -- the division below is then
     elementwise, giving each parameter i a gradient estimate scaled by its
-    OWN sigma_i, exactly the per-parameter-sigma OpenAI-ES estimator."""
+    OWN sigma_i, exactly the per-parameter-sigma OpenAI-ES estimator.
+
+    Task D (--freeze-decoder): sigma may have EXACT-ZERO entries for
+    parameters that were never perturbed (build_population leaves
+    theta_pop identical to mean_theta there, so eps_full's contribution is
+    also exactly 0 for those columns) -- a plain elementwise divide would
+    produce 0/0 = NaN there, which would then poison Adam's running
+    moments forever. Those entries' gradient is defined as exactly 0
+    instead (frozen parameters get zero gradient, matching their zero
+    Adam lr -- see steering_param_sigma_vector / clip_steering_params
+    callers in main())."""
     H = eps_half.shape[0]
     eps_full = np.concatenate([eps_half, -eps_half], axis=0)  # (2H, P)
     centered = rank_transform(fitness)
-    grad = (eps_full * centered[:, None]).sum(axis=0) / (2 * H * sigma)
+    numer = (eps_full * centered[:, None]).sum(axis=0)
+    denom = np.broadcast_to(np.asarray(2 * H * sigma, dtype=np.float64), numer.shape)
+    grad = np.zeros_like(numer)
+    nonzero = denom != 0
+    grad[nonzero] = numer[nonzero] / denom[nonzero]
     return grad
 
 
@@ -363,6 +395,11 @@ def load_checkpoint(run_dir: Path):
     # lr multiplier used going forward changes.
     lr_steer = config.get("lr_steer", config["lr"])
     lr_vec = steering_param_sigma_vector(config["lr"], lr_steer, mean_theta.shape[0])
+    # Task D: re-apply --freeze-decoder's lr=0 on resume too (defaults to
+    # True for checkpoints saved before this flag existed, matching the
+    # new default).
+    if config.get("freeze_decoder", True):
+        lr_vec[N_ENC_PARAMS:] = 0.0
     adam = Adam(mean_theta.shape[0], lr=lr_vec)
     adam.load_state_dict({"m": data["adam_m"], "v": data["adam_v"], "t": data["adam_t"]})
     gen = int(data["gen"])
@@ -422,13 +459,23 @@ def main(argv=None):
     parser.add_argument("--steps-per-action", type=int, default=20)
     parser.add_argument("--beta-nic", type=float, default=1.0)
     parser.add_argument("--beta-jackpot", type=float, default=1.5)
-    parser.add_argument("--gamma", type=float, default=0.98)
+    parser.add_argument("--gamma", type=float, default=1.0,
+                         help="Discount applied to --mode hijacked's per-step learning signal "
+                              "(welfare mode ignores gamma entirely -- fitness is the plain summed "
+                              "true reward). Default 1.0 (was 0.98): at 0.98 the effective horizon "
+                              "(~50 steps) is close to the time needed to just WALK to a source, so "
+                              "fitness mostly reflected start-position luck rather than the source "
+                              "actually reached -- see results/addicted_v4_lr003 and "
+                              "results/addicted_v4_gamma098. Kept as a flag so gamma=0.98 stays "
+                              "reproducible if needed.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=18)
     parser.add_argument("--checkpoint-every", type=int, default=5)
     parser.add_argument("--eval-every", type=int, default=5,
                          help="spec (Task 3): evaluate the noiseless mean every 5 generations.")
-    parser.add_argument("--eval-episodes", type=int, default=8)
+    parser.add_argument("--eval-episodes", type=int, default=16,
+                         help="Fixed eval seeds for the noiseless-mean eval every --eval-every "
+                              "generations (was 8).")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init-from", type=str, default=None,
                          help="Path to another run's ckpt.npz (e.g. a --mode taxis checkpoint) "
@@ -436,6 +483,29 @@ def main(argv=None):
                               "--resume finds an existing checkpoint for THIS run.")
     parser.add_argument("--taxis-substeps", type=int, default=120,
                          help="--mode taxis only: steps per modality sub-episode (spec: 120).")
+    parser.add_argument("--contrast-weighting", type=str, default="sqrt",
+                         choices=["none", "sqrt", "quarter"],
+                         help="flyrl.policy.BrainPolicy's v4.1 intensity-weighted contrast mode -- "
+                              "'none' reproduces v4's original unweighted contrast. See "
+                              "flyrl.policy module docstring.")
+    parser.add_argument("--freeze-decoder", action=argparse.BooleanOptionalAction, default=True,
+                         help="Default ON for hijacked/welfare modes: the decoder block (W_dec, "
+                              "b_dec -- everything after the N_ENC_PARAMS=31 encoder params) gets "
+                              "ES sigma=0 and Adam lr=0, i.e. it is NEITHER perturbed NOR updated -- "
+                              "it stays exactly at its --init-from (DAgger-fitted, already "
+                              "teacher-level) value all run. Fixes poor ES signal-to-noise: with "
+                              "289 total params, only 31 are encoder (where preference lives) and "
+                              "258 are an already-good decoder that pure noise would otherwise "
+                              "perturb every generation for no benefit. Pass --no-freeze-decoder to "
+                              "let the decoder keep training.")
+    parser.add_argument("--seeds-per-gen", type=int, default=2,
+                         help="Number of common-random-number env seeds the population is "
+                              "evaluated on per generation (fitness/welfare/metrics/DAN rates are "
+                              "averaged across them) -- reduces per-generation variance from "
+                              "start-position luck. Spec: 2, if wall-clock stays <= ~100s/gen on "
+                              "this machine; pass 1 to fall back to the original single-seed "
+                              "behaviour (does not apply to --mode taxis, which already runs 3 "
+                              "CRN sub-episodes/modality per generation).")
     args = parser.parse_args(argv)
 
     torch.set_num_threads(args.threads)
@@ -472,6 +542,12 @@ def main(argv=None):
         # (reusing steering_param_sigma_vector) -- lr_steer for the 19
         # steering params, lr for everything else.
         lr_vec = steering_param_sigma_vector(args.lr, args.lr_steer, mean_theta.shape[0])
+        if args.freeze_decoder:
+            # Task D: the decoder block (everything after the N_ENC_PARAMS
+            # encoder params) gets lr=0 -- Adam.step() then always returns
+            # exactly 0 for these indices (see Adam.step: self.lr * mhat /
+            # ...), so the decoder never moves from its --init-from value.
+            lr_vec[N_ENC_PARAMS:] = 0.0
         adam = Adam(mean_theta.shape[0], lr=lr_vec)
         start_gen = 0
 
@@ -482,10 +558,17 @@ def main(argv=None):
     # barely move them or blow up the decoder.
     sigma_vec = steering_param_sigma_vector(args.sigma, args.sigma_steer, mean_theta.shape[0])
     sigma_vec = sigma_vec * (args.sigma_decay ** start_gen)
+    if args.freeze_decoder:
+        # Task D: decoder gets sigma=0 too -- build_population then leaves
+        # every population member's decoder block IDENTICAL to mean_theta's
+        # (no perturbation at all), and es_gradient's zero-sigma handling
+        # (see its docstring) keeps the resulting 0/0 from producing NaN.
+        sigma_vec[N_ENC_PARAMS:] = 0.0
 
     print(f"BrainPolicy(batch={args.population}) ... (loading brain weights)")
     policy = BrainPolicy(batch=args.population, device=args.device, dt=args.dt,
-                          steps_per_action=args.steps_per_action, seed=args.seed)
+                          steps_per_action=args.steps_per_action, seed=args.seed,
+                          contrast_weighting=args.contrast_weighting)
     vec_env = VecFlyAddictionEnv(num_envs=args.population, n_steps=args.n_steps)
     assert policy.n_params == N_PARAMS
     print(f"n_params={policy.n_params}  n_input_neurons={policy.n_input_neurons}  "
@@ -494,7 +577,8 @@ def main(argv=None):
     eval_policy = eval_env = None
     if args.eval_every > 0:
         eval_policy = BrainPolicy(batch=args.eval_episodes, device=args.device, dt=args.dt,
-                                   steps_per_action=args.steps_per_action, seed=args.seed + 1)
+                                   steps_per_action=args.steps_per_action, seed=args.seed + 1,
+                                   contrast_weighting=args.contrast_weighting)
         eval_env = VecFlyAddictionEnv(num_envs=args.eval_episodes, n_steps=args.n_steps)
 
     is_taxis = args.mode == "taxis"
@@ -509,10 +593,20 @@ def main(argv=None):
             result = run_taxis_generation(policy, vec_env, theta_pop, seed=env_seed,
                                            n_substeps=args.taxis_substeps)
         else:
-            result = run_episode_batch(policy, vec_env, theta_pop, seed=env_seed, n_steps=args.n_steps,
-                                        mode=args.mode, beta_nic=args.beta_nic,
-                                        beta_jackpot=args.beta_jackpot, gamma=args.gamma,
-                                        common_seed=True)
+            # Task D(iii): average over --seeds-per-gen COMMON (across the
+            # population) env seeds, new each generation, to reduce
+            # per-generation fitness variance from start-position luck.
+            # Each seed is a full independent rollout of the SAME
+            # population, so cost scales linearly with --seeds-per-gen.
+            seeds_this_gen = [env_seed + k * 500_000 for k in range(max(1, args.seeds_per_gen))]
+            gen_results = [
+                run_episode_batch(policy, vec_env, theta_pop, seed=s, n_steps=args.n_steps,
+                                   mode=args.mode, beta_nic=args.beta_nic,
+                                   beta_jackpot=args.beta_jackpot, gamma=args.gamma,
+                                   common_seed=True)
+                for s in seeds_this_gen
+            ]
+            result = gen_results[0] if len(gen_results) == 1 else _average_episode_results(gen_results)
 
         grad = es_gradient(eps_half, result.fitness, sigma_vec)
         update = adam.step(grad)

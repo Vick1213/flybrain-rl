@@ -212,10 +212,15 @@ def sign_agreement(pred_turn: np.ndarray, teacher_turn: np.ndarray, deadzone: fl
 # Theta assembly (fixed encoder + a decoder we fit ourselves)
 # ---------------------------------------------------------------------
 
-def fixed_encoder_block(seed: int = 0) -> np.ndarray:
+def fixed_encoder_block(seed: int = 0, init_c: float = None) -> np.ndarray:
     """The encoder weight+bias block of flyrl.policy.default_params(),
-    held FIXED throughout Task 2 (own-channel drive + bilateral contrast)."""
-    return default_params(seed=seed)[:N_ENC_PARAMS].copy()
+    held FIXED throughout Task 2 (own-channel drive + bilateral contrast).
+    `init_c` (v4.1) overrides the default c_food/c_smoke/c_reels init (see
+    flyrl.policy.default_params) -- used by --init-c to compensate if the
+    intensity-weighted contrast (--contrast-weighting) weakens far-range
+    steering enough to hurt DAgger reach."""
+    kwargs = {} if init_c is None else {"init_c": init_c}
+    return default_params(seed=seed, **kwargs)[:N_ENC_PARAMS].copy()
 
 
 def assemble_theta(enc_block: np.ndarray, W_dec: np.ndarray, b_dec: np.ndarray) -> np.ndarray:
@@ -421,6 +426,15 @@ def main(argv=None):
     parser.add_argument("--dt", type=float, default=0.5)
     parser.add_argument("--steps-per-action", type=int, default=20)
     parser.add_argument("--threads", type=int, default=6)
+    parser.add_argument("--contrast-weighting", type=str, default="sqrt",
+                         choices=["none", "sqrt", "quarter"],
+                         help="v4.1 (flyrl.policy.BrainPolicy): 'none' reproduces v4's original "
+                              "unweighted bilateral contrast; 'sqrt' (default) and 'quarter' "
+                              "weight it by source intensity -- see flyrl.policy module docstring.")
+    parser.add_argument("--init-c", type=float, default=None,
+                         help="Override the fixed encoder's c_food/c_smoke/c_reels init (default: "
+                              "flyrl.policy's own default, 4.0). Raise this (e.g. 6) if "
+                              "--contrast-weighting weakens far-range steering enough to hurt reach.")
     args = parser.parse_args(argv)
 
     import torch
@@ -439,11 +453,13 @@ def main(argv=None):
     n_train_envs = B - n_val
     assert 0 < n_val < B
 
-    enc_block = fixed_encoder_block(seed=args.seed)
+    enc_block = fixed_encoder_block(seed=args.seed, init_c=args.init_c)
     policy = BrainPolicy(batch=B, device=args.device, dt=args.dt,
-                          steps_per_action=args.steps_per_action, seed=args.seed)
+                          steps_per_action=args.steps_per_action, seed=args.seed,
+                          contrast_weighting=args.contrast_weighting)
     eval_policy = BrainPolicy(batch=args.eval_envs, device=args.device, dt=args.dt,
-                               steps_per_action=args.steps_per_action, seed=args.seed + 1)
+                               steps_per_action=args.steps_per_action, seed=args.seed + 1,
+                               contrast_weighting=args.contrast_weighting)
     vec_env = VecFlyAddictionEnv(num_envs=B, n_steps=300)
     bypass = BypassTracer(batch=B, dt=args.dt, steps_per_action=args.steps_per_action)
     rng = np.random.default_rng(args.seed)

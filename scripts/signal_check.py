@@ -2,32 +2,37 @@
 the key risk gate, per spec: "We need to see that the parameterisation can
 express both an addicted and a sober fly").
 
-Starting from the v4 DAgger checkpoint (results/taxis_dagger_v4/ckpt.npz),
-evaluates 3 HAND-SET variants of the 19-param v4 steering encoder on 16
-fixed seeds x 300 steps each, in the FULL addiction env (all three sources
-present, no obs masking):
+Starting from the v4.1 DAgger checkpoint (results/taxis_dagger_v41/ckpt.npz,
+intensity-weighted contrast -- see flyrl.policy module docstring), evaluates
+3 HAND-SET variants of the 19-param v4.1 steering encoder on 16 fixed seeds
+x 300 steps each, in the FULL addiction env (all three sources present, no
+obs masking), with gamma=1.0 (was 0.98 in the v4 signal check -- see
+flyrl.train_es's --gamma docstring for why a myopic discount close to the
+walk-to-source horizon was diagnosed as confounding fitness with
+start-position luck):
 
-  (i)   init                -- the DAgger checkpoint's own encoder, unmodified
-                                (equal a=1.5/c=+3 attraction to all 3 sources)
-  (ii)  c_smoke=+6, c_food=c_reels=0   -- an "addicted" parameterization:
-                                strong extra attraction to smoke only
-  (iii) c_food=+6, m_food_hunger=+3, c_smoke=c_reels=-3  -- a "sober"
-                                parameterization: strong attraction to food
-                                (amplified by hunger), AVERSION to smoke/reels
+  (i)   init      -- the DAgger checkpoint's own encoder, unmodified (equal
+                      a=1.5/c=+4 attraction to all 3 sources)
+  (ii)  smoker     -- c_smoke=+8, c_food=c_reels=0, a_food=a_reels=0: an
+                      "addicted" parameterization with strong extra
+                      attraction to smoke only and food/reels' own-side
+                      intensity response zeroed too (not just their contrast)
+  (iii) forager    -- c_food=+8, m_food_hunger=+3, c_smoke=c_reels=-3: a
+                      "sober" parameterization: strong attraction to food
+                      (amplified by hunger), AVERSION to smoke/reels
 
-All other steering params (a, the other m entries, h, b) and the entire
-decoder are left exactly as the checkpoint. For each variant, reports true
-welfare (plain summed env reward) and hijacked fitness (beta_nic=1.0,
-beta_jackpot=1.5, gamma=0.98 -- flyrl.train_es's --mode hijacked defaults),
-computed in ONE rollout per variant (flyrl.train_es.run_episode_batch with
-mode="hijacked" always also computes true welfare), plus source-time
-fractions and addiction metrics.
+All other steering params (a other than ii's a_food/a_reels override, the
+other m entries, h, b) and the entire decoder are left exactly as the
+checkpoint. For each variant, reports true welfare (plain summed env
+reward) and hijacked fitness (beta_nic=1.0, beta_jackpot=1.5, gamma=1.0 --
+flyrl.train_es's --mode hijacked defaults), computed in ONE rollout per
+variant (flyrl.train_es.run_episode_batch with mode="hijacked" always also
+computes true welfare), plus source-time fractions and addiction metrics.
 
-Success criterion (spec): (ii) should spend clearly more time at smoke AND
-score higher HIJACKED fitness than (iii), while (iii) should score higher
-TRUE welfare -- i.e. the two fitness functions must rank (ii) and (iii)
-OPPOSITELY, showing the parameterization can express both an addicted and a
-sober fly.
+Success criterion (spec): (ii)'s hijacked fitness must beat BOTH (iii) and
+(i), while (iii)'s true welfare must beat (ii)'s -- i.e. the two fitness
+functions must rank (ii) and (iii) OPPOSITELY, showing the parameterization
+can express both an addicted and a sober fly.
 
 Usage: .venv/bin/python -m scripts.signal_check
 Writes results/signal_check/report.json.
@@ -49,7 +54,7 @@ from flyrl.policy import BrainPolicy, N_PARAMS, steering_param_names, unpack_ste
 from flyrl.addiction_env import VecFlyAddictionEnv  # noqa: E402
 from flyrl.train_es import run_episode_batch  # noqa: E402
 
-CKPT_PATH = _REPO_ROOT / "results" / "taxis_dagger_v4" / "ckpt.npz"
+CKPT_PATH = _REPO_ROOT / "results" / "taxis_dagger_v41" / "ckpt.npz"
 OUT_DIR = _REPO_ROOT / "results" / "signal_check"
 OUT_PATH = OUT_DIR / "report.json"
 
@@ -58,15 +63,16 @@ N_STEPS = 300
 EVAL_SEED = 555_000
 BETA_NIC = 1.0
 BETA_JACKPOT = 1.5
-GAMMA = 0.98
+GAMMA = 1.0  # was 0.98 for the v4 signal check -- see flyrl.train_es --gamma docstring
+DEFAULT_CONTRAST_WEIGHTING = "sqrt"  # fallback if the checkpoint's config lacks this key
 
 METRIC_KEYS = ("frac_food", "frac_smoke", "frac_reels", "compulsion_smoke",
                "compulsion_reels", "mean_withdrawal", "final_tolerance")
 
 VARIANTS = {
     "i_init_equal_attraction": {},
-    "ii_addicted_smoke": {"c_food": 0.0, "c_smoke": 6.0, "c_reels": 0.0},
-    "iii_sober_food": {"c_food": 6.0, "m_food_hunger": 3.0, "c_smoke": -3.0, "c_reels": -3.0},
+    "ii_addicted_smoke": {"c_food": 0.0, "c_smoke": 8.0, "c_reels": 0.0, "a_food": 0.0, "a_reels": 0.0},
+    "iii_sober_food": {"c_food": 8.0, "m_food_hunger": 3.0, "c_smoke": -3.0, "c_reels": -3.0},
 }
 
 
@@ -80,12 +86,16 @@ def make_variant_theta(base_theta: np.ndarray, overrides: dict) -> np.ndarray:
 
 
 def main():
-    assert CKPT_PATH.exists(), f"{CKPT_PATH} not found -- run flyrl.dagger_taxis --run-name taxis_dagger_v4 first"
+    assert CKPT_PATH.exists(), f"{CKPT_PATH} not found -- run flyrl.dagger_taxis --run-name taxis_dagger_v41 first"
     data = np.load(CKPT_PATH)
     base_theta = data["mean_theta"].astype(np.float64)
     assert base_theta.shape == (N_PARAMS,), f"ckpt mean_theta shape {base_theta.shape} != ({N_PARAMS},)"
+    config = json.loads(str(data["config_json"])) if "config_json" in data else {}
+    contrast_weighting = config.get("contrast_weighting", DEFAULT_CONTRAST_WEIGHTING)
+    print(f"Using contrast_weighting={contrast_weighting!r} (from checkpoint config)")
 
-    policy = BrainPolicy(batch=N_SEEDS, device="cpu", dt=0.5, steps_per_action=20, seed=0)
+    policy = BrainPolicy(batch=N_SEEDS, device="cpu", dt=0.5, steps_per_action=20, seed=0,
+                          contrast_weighting=contrast_weighting)
     vec_env = VecFlyAddictionEnv(num_envs=N_SEEDS, n_steps=N_STEPS)
 
     report = {}
@@ -108,15 +118,17 @@ def main():
               f"hijacked_fitness={row['hijacked_fitness_mean']:8.3f}  "
               f"food={row['frac_food']:.2f} smoke={row['frac_smoke']:.2f} reels={row['frac_reels']:.2f}")
 
-    ii, iii = report["ii_addicted_smoke"], report["iii_sober_food"]
+    i_, ii, iii = report["i_init_equal_attraction"], report["ii_addicted_smoke"], report["iii_sober_food"]
+    # Spec (Part E): hijacked fitness (ii) > (iii) AND (ii) > (i); true
+    # welfare (iii) > (ii).
     ranking_ok = (
-        ii["frac_smoke"] > iii["frac_smoke"]
-        and ii["hijacked_fitness_mean"] > iii["hijacked_fitness_mean"]
+        ii["hijacked_fitness_mean"] > iii["hijacked_fitness_mean"]
+        and ii["hijacked_fitness_mean"] > i_["hijacked_fitness_mean"]
         and iii["true_welfare_mean"] > ii["true_welfare_mean"]
     )
     report["_ranking_check"] = {
-        "ii_frac_smoke_gt_iii": bool(ii["frac_smoke"] > iii["frac_smoke"]),
         "ii_hijacked_fitness_gt_iii": bool(ii["hijacked_fitness_mean"] > iii["hijacked_fitness_mean"]),
+        "ii_hijacked_fitness_gt_i": bool(ii["hijacked_fitness_mean"] > i_["hijacked_fitness_mean"]),
         "iii_true_welfare_gt_ii": bool(iii["true_welfare_mean"] > ii["true_welfare_mean"]),
         "ranking_ok": bool(ranking_ok),
     }

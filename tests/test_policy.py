@@ -16,6 +16,7 @@ from flyrl.policy import (
     BrainPolicy, default_params, N_PARAMS, _load_readout_cache, DEFAULT_INIT_SCALE,
     N_GROUPS, N_POOLS, N_FEATURES, N_ACTIONS, N_ENC_PARAMS, N_STEER_PARAMS,
     steering_param_names, unpack_steering_params, steering_param_sigma_vector,
+    CONTRAST_WEIGHTING_POWERS, DEFAULT_CONTRAST_WEIGHTING, ADD_STOP_ON_CONTACT,
 )
 from flyrl.io_neurons import GROUP_NAMES, GROUP_MAX_RATE_HZ
 from flyrl.addiction_env import FlyAddictionEnv, VecFlyAddictionEnv
@@ -218,6 +219,204 @@ def test_steering_params_per_batch_element_independence():
     assert not np.allclose(rates_base[1], rates_perturbed[1]), (
         "perturbing row 1's c_smoke had no effect on row 1's steer_L/steer_R rates"
     )
+
+
+# ---------------------------------------------------------------------
+# v4.1: intensity-weighted contrast (contrast_weighting)
+# ---------------------------------------------------------------------
+
+def test_default_contrast_weighting_is_sqrt():
+    assert DEFAULT_CONTRAST_WEIGHTING == "sqrt"
+    assert set(CONTRAST_WEIGHTING_POWERS) == {"none", "sqrt", "quarter"}
+    assert CONTRAST_WEIGHTING_POWERS["none"] is None
+    assert CONTRAST_WEIGHTING_POWERS["sqrt"] == pytest.approx(0.5)
+    assert CONTRAST_WEIGHTING_POWERS["quarter"] == pytest.approx(0.25)
+
+
+def test_invalid_contrast_weighting_raises():
+    with pytest.raises(ValueError):
+        BrainPolicy(batch=1, device="cpu", dt=0.5, steps_per_action=4, seed=0,
+                    contrast_weighting="bogus")
+
+
+def _theta_isolating_food_contrast(seed: int = 0) -> np.ndarray:
+    """default_params with a_food (and implicitly a_smoke/a_reels, since
+    their obs channels are 0 in these tests) zeroed, so the ONLY thing
+    driving any steer_L/steer_R asymmetry is c_food's contrast term --
+    isolates the contrast-weighting mechanism from the separately
+    intensity-dependent a*I term (which shrinks with absolute intensity
+    for an unrelated reason: a*(L-R) is not ratio-invariant either)."""
+    theta = default_params(seed=seed).copy()
+    theta[steering_param_names().index("a_food")] = 0.0
+    return theta
+
+
+def test_contrast_weighting_none_ignores_intensity_like_v4():
+    """contrast_weighting='none' must reproduce v4's original formula
+    EXACTLY: with a_food zeroed (see _theta_isolating_food_contrast), two
+    observations with the SAME L/R ratio (same contrast) but very
+    different absolute intensity must drive IDENTICAL steer_L/steer_R
+    rates, since v4's C_src carries no intensity information at all."""
+    pol = BrainPolicy(batch=1, device="cpu", dt=0.5, steps_per_action=4, seed=0,
+                       contrast_weighting="none")
+    theta = np.tile(_theta_isolating_food_contrast(), (1, 1)).astype(np.float32)
+    pol.set_params(theta)
+
+    obs_strong = np.zeros((1, 12), dtype=np.float32)
+    obs_strong[0, 0] = 0.9  # food_odor_L
+    obs_strong[0, 1] = 0.1  # food_odor_R  (ratio 9:1, same as below)
+    obs_faint = np.zeros((1, 12), dtype=np.float32)
+    obs_faint[0, 0] = 0.09
+    obs_faint[0, 1] = 0.01
+
+    rates_strong = pol.group_rates(obs_strong)
+    rates_faint = pol.group_rates(obs_faint)
+    np.testing.assert_allclose(rates_strong[:, :2], rates_faint[:, :2], atol=1e-3)
+
+
+def test_contrast_weighting_sqrt_weakens_faint_source_lateralization():
+    """v4.1: with a_food zeroed (see _theta_isolating_food_contrast) and
+    contrast_weighting='sqrt', the SAME 9:1 L/R ratio must produce a
+    SMALLER (steer_L - steer_R) difference when the source is faint (low
+    absolute intensity, i.e. far away) than when it is strong (near) --
+    the whole point of intensity-weighting the contrast (fixes the
+    3-source bearing-averaging failure mode, see module docstring)."""
+    pol = BrainPolicy(batch=1, device="cpu", dt=0.5, steps_per_action=4, seed=0,
+                       contrast_weighting="sqrt")
+    theta = np.tile(_theta_isolating_food_contrast(), (1, 1)).astype(np.float32)
+    pol.set_params(theta)
+
+    obs_strong = np.zeros((1, 12), dtype=np.float32)
+    obs_strong[0, 0], obs_strong[0, 1] = 0.9, 0.1
+    obs_faint = np.zeros((1, 12), dtype=np.float32)
+    obs_faint[0, 0], obs_faint[0, 1] = 0.09, 0.01
+
+    rates_strong = pol.group_rates(obs_strong)
+    rates_faint = pol.group_rates(obs_faint)
+    diff_strong = float(rates_strong[0, 0] - rates_strong[0, 1])
+    diff_faint = float(rates_faint[0, 0] - rates_faint[0, 1])
+    assert diff_faint < diff_strong, (
+        "a fainter (farther) source with the same L/R ratio should lateralize "
+        "the shared steering pathway LESS under sqrt intensity weighting"
+    )
+    assert diff_faint > 0, "the faint source should still weakly favor its own side"
+
+
+def test_contrast_weighting_zero_intensity_gives_zero_weight():
+    """W_src must be exactly 0 (not NaN) when a source's L and R both read
+    0, for every weighting mode -- the source contributes nothing to the
+    drive when it is entirely out of range/view."""
+    for mode in ("none", "sqrt", "quarter"):
+        pol = BrainPolicy(batch=1, device="cpu", dt=0.5, steps_per_action=4, seed=0,
+                           contrast_weighting=mode)
+        theta = np.tile(default_params(seed=0), (1, 1)).astype(np.float32)
+        pol.set_params(theta)
+        obs = np.zeros((1, 12), dtype=np.float32)  # all sources at 0
+        rates = pol.group_rates(obs)
+        assert np.all(np.isfinite(rates)), f"mode={mode} produced non-finite rates with all-zero obs"
+
+
+@pytest.mark.parametrize("mode", ["none", "sqrt", "quarter"])
+def test_encoder_mirror_symmetry_holds_for_every_contrast_weighting(mode):
+    """The v4.1 intensity weight W_src depends only on L_src+R_src (symmetric
+    under swapping L and R), so mirror symmetry (see
+    test_encoder_mirror_symmetry_full_lr_swap) must hold for EVERY
+    contrast_weighting mode, not just the default."""
+    B = 1
+    pol = BrainPolicy(batch=B, device="cpu", dt=0.5, steps_per_action=4, seed=0,
+                       contrast_weighting=mode)
+    theta = default_params(seed=0).copy()
+    rng = np.random.default_rng(5)
+    names = steering_param_names()
+    for i, name in enumerate(names):
+        if name.startswith("m_") or name.startswith("h_"):
+            theta[i] = rng.uniform(-1.0, 1.0)
+    theta = np.tile(theta, (B, 1)).astype(np.float32)
+    pol.set_params(theta)
+
+    obs = rng.uniform(0.05, 0.95, size=(B, 12)).astype(np.float32)
+    obs[:, 6:] = rng.uniform(0.0, 1.0, size=(B, 6))
+
+    rates = pol.group_rates(obs)
+    obs_swapped = obs.copy()
+    for li, ri in [(0, 1), (2, 3), (4, 5)]:
+        obs_swapped[:, [li, ri]] = obs_swapped[:, [ri, li]]
+    rates_swapped = pol.group_rates(obs_swapped)
+
+    np.testing.assert_allclose(rates_swapped[:, 0], rates[:, 1], atol=1e-5)
+    np.testing.assert_allclose(rates_swapped[:, 1], rates[:, 0], atol=1e-5)
+
+
+def test_default_params_init_c_override():
+    """flyrl.dagger_taxis's --init-c relies on default_params(init_c=...)
+    overriding c_food/c_smoke/c_reels while leaving everything else (incl.
+    a, m, h, b, contact block, decoder) untouched."""
+    theta_default = default_params(seed=0)
+    theta_c6 = default_params(seed=0, init_c=6.0)
+    names = steering_param_names()
+    c_idx = [names.index(f"c_{s}") for s in ("food", "smoke", "reels")]
+
+    np.testing.assert_allclose(theta_default[c_idx], 4.0)  # v4.1 default init
+    np.testing.assert_allclose(theta_c6[c_idx], 6.0)
+
+    non_c_mask = np.ones(N_PARAMS, dtype=bool)
+    non_c_mask[c_idx] = False
+    np.testing.assert_array_equal(theta_default[non_c_mask], theta_c6[non_c_mask])
+
+
+# ---------------------------------------------------------------------
+# Task C: motor-side "stop-on-contact" reflex (only meaningful/exercised
+# while flyrl.policy.ADD_STOP_ON_CONTACT is True -- see that flag's
+# docstring for the empirical decision this repo currently ships with).
+# ---------------------------------------------------------------------
+
+def test_steer_params_count_matches_add_stop_on_contact_flag():
+    expected = 22 if ADD_STOP_ON_CONTACT else 19
+    assert N_STEER_PARAMS == expected
+    names = steering_param_names()
+    assert len(names) == expected
+    if not ADD_STOP_ON_CONTACT:
+        assert not any(n.startswith("g_") for n in names)
+
+
+@pytest.mark.skipif(not ADD_STOP_ON_CONTACT, reason="ADD_STOP_ON_CONTACT is currently False (not needed -- see policy.py)")
+def test_stop_on_contact_reflex_dampens_forward_action_when_tasting():
+    """Zero the decoder's weight matrix and fix its bias so the PRE-reflex
+    decoder output is a known constant, isolating the reflex's own
+    (obs-channel-driven, brain-independent) effect from the taste channel's
+    ALSO changing the brain's own response via the sugar_taste contact
+    group -- forward_action = decoder_forward * (1 - g_sugar*taste),
+    clipped to [-1, 1] (see ADD_STOP_ON_CONTACT docstring)."""
+    B = 1
+    pol = BrainPolicy(batch=B, device="cpu", dt=0.5, steps_per_action=4, seed=0)
+    assert N_STEER_PARAMS == 22
+    assert steering_param_names()[-3:] == ["g_sugar_taste", "g_nicotine_taste", "g_reels_jackpot"]
+
+    theta = default_params(seed=0).copy()
+    g_idx = steering_param_names().index("g_sugar_taste")
+    theta[g_idx] = 0.8
+    dec_w_start = N_ENC_PARAMS
+    dec_w_end = N_ENC_PARAMS + N_ACTIONS * N_FEATURES
+    theta[dec_w_start:dec_w_end] = 0.0
+    theta[dec_w_end:dec_w_end + N_ACTIONS] = [0.0, 0.6]  # b_dec: turn=0, forward pre-tanh=+0.6
+    theta_b = np.tile(theta, (B, 1)).astype(np.float32)
+    pol.set_params(theta_b)
+    pol.reset()
+
+    obs_no_taste = np.zeros((B, 12), dtype=np.float32)
+    action_no_taste = pol.act(obs_no_taste)
+
+    pol.reset()
+    obs_tasting = np.zeros((B, 12), dtype=np.float32)
+    obs_tasting[:, 6] = 1.0  # sugar_taste on
+    action_tasting = pol.act(obs_tasting)
+
+    expected_no_taste = np.tanh(0.6)
+    expected_tasting = expected_no_taste * (1.0 - 0.8)
+    np.testing.assert_allclose(action_no_taste[0, 1], expected_no_taste, atol=1e-5)
+    np.testing.assert_allclose(action_tasting[0, 1], expected_tasting, atol=1e-5)
+    np.testing.assert_allclose(action_no_taste[0, 0], 0.0, atol=1e-5)
+    np.testing.assert_allclose(action_tasting[0, 0], 0.0, atol=1e-5)
 
 
 # ---------------------------------------------------------------------

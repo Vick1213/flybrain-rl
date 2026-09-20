@@ -1,0 +1,34 @@
+{
+  "v4_none": {
+    "label": "v4 (pure contrast)",
+    "ckpt": "results/taxis_dagger_v4/ckpt.npz",
+    "contrast_weighting": "none",
+    "frac_food": 0.12291666666666667,
+    "frac_smoke": 0.06166666666666667,
+    "frac_reels": 0.0575,
+    "frac_any_source": 0.24208333333333334,
+    "n_seeds_arrived": 6,
+    "mean_time_to_first_arrival": 15.833333333333334,
+    "mean_dwell_length": 166.0,
+    "n_dwell_events": 7,
+    "mean_abs_forward_at_source": 0.9768659633379141,
+    "mean_abs_forward_elsewhere": 0.9318709699469662,
+    "mean_forward_at_source": -0.9746814459256136
+  },
+  "v41_weighted": {
+    "label": "v4.1 (sqrt weighting)",
+    "ckpt": "results/taxis_dagger_v41/ckpt.npz",
+    "contrast_weighting": "sqrt",
+    "frac_food": 0.12041666666666667,
+    "frac_smoke": 0.06166666666666667,
+    "frac_reels": 0.096875,
+    "frac_any_source": 0.2789583333333333,
+    "n_seeds_arrived": 6,
+    "mean_time_to_first_arrival": 27.166666666666668,
+    "mean_dwell_length": 191.28571428571428,
+    "n_dwell_events": 7,
+    "mean_abs_forward_at_source": 0.9819970526875089,
+    "mean_abs_forward_elsewhere": 0.9326967011026638,
+    "mean_forward_at_source": -0.9799493596770142
+  }
+}

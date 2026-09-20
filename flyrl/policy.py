@@ -56,6 +56,50 @@ lets internal state modulate a source's attractiveness (e.g. m_food,hunger
 > 0 makes food more attractive when hungry). This is exactly where
 addiction/preference will live once ES trains these weights (Task 3).
 
+v4.1 encoder: intensity-weighted contrast (fixes 3-source averaging)
+----------------------------------------------------------------------
+v4's C_src = (L-R)/(L+R+eps) is DISTANCE-INDEPENDENT: a faint, far-away
+source's contrast is just as large as a near, strong one's. With all three
+sources present (the full addiction arena), drive_X becomes the SUM of
+three roughly-unit-scale contrast terms and the fly steers toward their
+average direction instead of committing to the nearest/strongest one --
+diagnosed from two hijacked ES runs (results/addicted_v4_lr003,
+results/addicted_v4_gamma098) where preferences drifted correctly toward
+smoke but realised time-at-source stayed ~5-10% and frac_smoke was
+unstable across generations (see this module's CLAUDE.md-directed task
+spec for the run numbers).
+
+v4.1 fixes this by weighting every C_src by an intensity factor
+W_src = sqrt((L_src + R_src) / 2) (0 when both sides read 0, monotonic in
+distance since both L and R decay with distance -- see
+FlyAddictionEnv.odor_lambda), so a far/faint source's contrast contributes
+much less to the drive than a near/strong one, letting the fly commit to
+whichever source it is actually close to instead of averaging bearings:
+
+    for side X in {L, R}, sign s_X = +1 (L) / -1 (R):
+      drive_X = b + sum_src [ a_src * I_src,X
+                               + s_X * c_src * (W_src * C_src)
+                               + s_X * sum_state m_src,state * state * (W_src * C_src) ]
+                  + sum_state h_state * state
+
+Only the c and m terms (which use C_src) are reweighted; the a_src * I_src
+term is untouched (it was never distance-blind -- I_src,X already IS the
+raw per-side intensity). Mirror symmetry is preserved: W_src depends only
+on L+R (symmetric under an L/R swap), so swapping every source's L/R obs
+still swaps drive_L and drive_R exactly, same as v4.
+
+The exponent is configurable via BrainPolicy's `contrast_weighting`
+constructor argument so v4's pure-contrast behaviour stays reproducible
+behind a flag instead of being silently lost:
+  'none'    -- W_src == 1 always (the original v4 formula, unweighted).
+  'sqrt'    -- W_src = sqrt((L+R)/2)  (v4.1 default).
+  'quarter' -- W_src = ((L+R)/2)**0.25 (gentler falloff, tried if 'sqrt'
+              weakens far-range steering enough to drop DAgger reach below
+              the Task B gate -- see results/taxis_dagger_v41/).
+This changes ONLY the runtime encoder formula (BrainPolicy._encode), never
+the 19-param flat layout or parameter names -- theta vectors are fully
+interchangeable across weighting modes.
+
 The remaining six anatomical groups (sugar_taste, nicotine_taste,
 reels_jackpot, hunger, nicotine, withdrawal) keep the simple v1-v3
 own-channel form: rate = max_rate * sigmoid(w * obs_channel + b).
@@ -65,11 +109,13 @@ batch element: BrainPolicy is BATCHED, i.e. parameters are a (B, P) tensor
 -- one full encoder+decoder per batch element (used by ES: one population
 member per batch row), all sharing ONE FastBrain(batch=B) instance (the
 brain weights themselves are never trained/mutated). Flat layout (fixed,
-see set_params): the first N_STEER_PARAMS=19 entries are ALWAYS the
-steering block (b, a[3], c[3], m[3x3], h[3], in that order), followed by
-N_CONTACT_PARAMS=12 (w,b per contact group), followed by the decoder
-(W_dec, b_dec). flyrl.train_es relies on this fixed layout to give the 19
-steering params a different (larger) ES mutation sigma than the rest.
+see set_params): the first N_STEER_PARAMS (19, or 22 if
+ADD_STOP_ON_CONTACT -- see that flag's docstring) entries are ALWAYS the
+steering block (b, a[3], c[3], m[3x3], h[3], optionally g[3], in that
+order), followed by N_CONTACT_PARAMS=12 (w,b per contact group), followed
+by the decoder (W_dec, b_dec). flyrl.train_es relies on this fixed layout
+to give the steering params a different (larger) ES mutation sigma than
+the rest.
 
 Anatomical input groups and the readout neuron set are fixed, deterministic
 index sets built by flyrl.io_neurons (input groups, cached to
@@ -113,9 +159,42 @@ N_STEER_SOURCES = len(_STEER_SOURCES)   # 3
 N_STEER_STATES = len(_STEER_STATES)     # 3
 N_CONTACT_GROUPS = len(_CONTACT_OBS_IDX)  # 6
 
-# Flat steering-block layout: b(1), a(3), c(3), m(3x3=9), h(3) = 19
-N_STEER_PARAMS = 1 + N_STEER_SOURCES + N_STEER_SOURCES + N_STEER_SOURCES * N_STEER_STATES + N_STEER_STATES
-assert N_STEER_PARAMS == 19
+# ---------------------------------------------------------------------
+# Task C (commitment check): OPTIONAL motor-side "stop-on-contact" reflex.
+# This is NOT part of the connectome-driven encoder -- it post-processes
+# the DECODER's own forward-speed output using the raw taste/jackpot obs
+# channels (sugar_taste, nicotine_taste, reels_jackpot), exactly like a
+# reflex arc that bypasses the brain: forward_action = decoder_forward *
+# (1 - sum_k g_k * taste_k), clipped to [-1, 1]. Added ONLY if
+# results/commitment_check found short dwell times (fly walks through a
+# source instead of stopping) -- see that report for the empirical
+# decision. When True, the 3 trainable gains g_sugar/g_nicotine/g_reels are
+# APPENDED to the steering param block (steering_param_names order:
+# ..., h_hunger, h_nicotine, h_withdrawal, g_sugar, g_nicotine, g_reels),
+# so N_STEER_PARAMS becomes 22 and N_PARAMS grows by 3 accordingly -- every
+# helper below (steering_param_names/unpack/default_params/set_params)
+# keys off this one flag, no half-measures.
+# DECISION (results/commitment_check/report.json, 16 fixed seeds x 300
+# steps, FULL env, DAgger decoder from results/taxis_dagger_v4 (v4, 'none'
+# weighting) and results/taxis_dagger_v41 (v4.1, 'sqrt' weighting), init
+# encoder): mean dwell length was 166-191 steps (NOT short) for BOTH
+# variants, and the SIGNED mean forward action while at a source was
+# strongly negative (v4: -0.97, v4.1: -0.98, i.e. near-ZERO actual forward
+# speed) -- the DAgger-fitted decoder already learned to hover on contact
+# purely by imitating the scripted teacher's own hover behaviour (see
+# flyrl.scripted._steer_towards: speed_action=-1.0 when info['at'] ==
+# target). Not enabled.
+ADD_STOP_ON_CONTACT = False
+_TASTE_PARAM_NAMES = ("sugar_taste", "nicotine_taste", "reels_jackpot")
+_TASTE_OBS_IDX = [6, 7, 8]  # sugar_taste, nicotine_taste, reels_jackpot obs-channel indices
+_STEER_INIT_G = 0.8
+_N_STOP_ON_CONTACT_PARAMS = len(_TASTE_OBS_IDX)
+
+# Flat steering-block layout: b(1), a(3), c(3), m(3x3=9), h(3) = 19, plus
+# an optional g(3) stop-on-contact block (see ADD_STOP_ON_CONTACT) = 22.
+N_STEER_PARAMS = (1 + N_STEER_SOURCES + N_STEER_SOURCES + N_STEER_SOURCES * N_STEER_STATES + N_STEER_STATES
+                   + (_N_STOP_ON_CONTACT_PARAMS if ADD_STOP_ON_CONTACT else 0))
+assert N_STEER_PARAMS == (22 if ADD_STOP_ON_CONTACT else 19)
 N_CONTACT_PARAMS = 2 * N_CONTACT_GROUPS  # w,b per contact group = 12
 assert N_CONTACT_PARAMS == 12
 N_ENC_PARAMS = N_STEER_PARAMS + N_CONTACT_PARAMS  # 31
@@ -123,10 +202,16 @@ N_ENC_PARAMS = N_STEER_PARAMS + N_CONTACT_PARAMS  # 31
 _CONTRAST_EPS = 1e-6
 _NO_SIGNAL_EPS = 1e-3  # matches flyrl.scripted's own lost-signal-eps convention
 _STEER_INIT_A = 1.5
-_STEER_INIT_C = 3.0
+_STEER_INIT_C = 4.0  # v4.1 (was 3.0 in v4) -- see module docstring
 _STEER_INIT_B = -2.0
 _DIAG_INIT = 4.0
 _BIAS_INIT = -3.0
+
+# v4.1 intensity-weighted contrast (see module docstring): W_src =
+# ((L_src+R_src)/2) ** power, power=None means W_src == 1 (v4's original,
+# unweighted contrast, kept reproducible behind contrast_weighting='none').
+CONTRAST_WEIGHTING_POWERS = {"none": None, "sqrt": 0.5, "quarter": 0.25}
+DEFAULT_CONTRAST_WEIGHTING = "sqrt"
 
 # v2: default anatomical-prior decoder init scale (see default_params below
 # and results/screen/io_v2_choice.json "encoder_design_decision"). ES trains
@@ -212,15 +297,19 @@ def _load_readout_cache():
 
 
 def steering_param_names() -> list:
-    """Names of the N_STEER_PARAMS=19 steering-block entries, in flat-theta
+    """Names of the N_STEER_PARAMS steering-block entries, in flat-theta
     order (see set_params): b, a_food/a_smoke/a_reels, c_food/c_smoke/
-    c_reels, m_<src>_<state> (9, src-major), h_hunger/h_nicotine/h_withdrawal.
-    Used by flyrl.train_es to log preference drift (Task 3)."""
+    c_reels, m_<src>_<state> (9, src-major), h_hunger/h_nicotine/h_withdrawal,
+    and -- ONLY if ADD_STOP_ON_CONTACT -- g_sugar_taste/g_nicotine_taste/
+    g_reels_jackpot (19 -> 22 entries). Used by flyrl.train_es to log
+    preference drift (Task 3)."""
     names = ["b_steer"]
     names += [f"a_{src}" for src in _STEER_SOURCES]
     names += [f"c_{src}" for src in _STEER_SOURCES]
     names += [f"m_{src}_{state}" for src in _STEER_SOURCES for state in _STEER_STATES]
     names += [f"h_{state}" for state in _STEER_STATES]
+    if ADD_STOP_ON_CONTACT:
+        names += [f"g_{name}" for name in _TASTE_PARAM_NAMES]
     assert len(names) == N_STEER_PARAMS
     return names
 
@@ -246,14 +335,21 @@ def steering_param_sigma_vector(sigma_base: float, sigma_steer: float, n_params:
     return vec
 
 
-def default_params(seed: int = 0, init_scale: float = DEFAULT_INIT_SCALE) -> np.ndarray:
-    """The spec-prescribed v4 initialization, flattened to a (N_PARAMS,)
+def default_params(seed: int = 0, init_scale: float = DEFAULT_INIT_SCALE,
+                    init_c: float = _STEER_INIT_C) -> np.ndarray:
+    """The spec-prescribed v4.1 initialization, flattened to a (N_PARAMS,)
     vector.
 
-    Steering block (19 params): a=+1.5, c=+3, m=0, h=0, b=-2 for all three
+    Steering block (19, or 22 if ADD_STOP_ON_CONTACT): a=+1.5, c=init_c
+    (default +4.0, v4.1 -- was +3.0 in v4), m=0, h=0, b=-2 for all three
     sources -- i.e. EQUAL innate attraction to food/smoke/reels (m=0: no
     state-dependent modulation yet), matching the spec's "equal innate
-    attraction to all three sources" starting point.
+    attraction to all three sources" starting point. `init_c` is exposed
+    so callers (flyrl.dagger_taxis's --init-c) can raise it (e.g. to 6) if
+    v4.1's intensity weighting weakens far-range steering enough to hurt
+    DAgger reach. If ADD_STOP_ON_CONTACT, the 3 stop-on-contact gains
+    (g_sugar_taste/g_nicotine_taste/g_reels_jackpot) are appended at
+    _STEER_INIT_G (0.8) each.
 
     Contact/interoceptive block (12 params, 6 groups): w=+4, b=-3 (own-
     channel drive), unchanged from v1-v3.
@@ -273,10 +369,14 @@ def default_params(seed: int = 0, init_scale: float = DEFAULT_INIT_SCALE) -> np.
 
     b_steer = np.array([_STEER_INIT_B], dtype=np.float32)
     a_steer = np.full(N_STEER_SOURCES, _STEER_INIT_A, dtype=np.float32)
-    c_steer = np.full(N_STEER_SOURCES, _STEER_INIT_C, dtype=np.float32)
+    c_steer = np.full(N_STEER_SOURCES, init_c, dtype=np.float32)
     m_steer = np.zeros((N_STEER_SOURCES, N_STEER_STATES), dtype=np.float32)
     h_steer = np.zeros(N_STEER_STATES, dtype=np.float32)
-    steer_block = np.concatenate([b_steer, a_steer, c_steer, m_steer.reshape(-1), h_steer])
+    steer_parts = [b_steer, a_steer, c_steer, m_steer.reshape(-1), h_steer]
+    if ADD_STOP_ON_CONTACT:
+        g_steer = np.full(_N_STOP_ON_CONTACT_PARAMS, _STEER_INIT_G, dtype=np.float32)
+        steer_parts.append(g_steer)
+    steer_block = np.concatenate(steer_parts)
     assert steer_block.shape == (N_STEER_PARAMS,)
 
     w_contact = np.full(N_CONTACT_GROUPS, _DIAG_INIT, dtype=np.float32)
@@ -318,14 +418,27 @@ class BrainPolicy:
         Number of dt-steps simulated per env.step() (spec: 20, i.e. 10ms).
     seed : int, optional
         FastBrain's own Poisson-sampling RNG seed.
+    contrast_weighting : str
+        v4.1 (see module docstring): how each source's bilateral contrast
+        C_src is weighted by intensity before entering the steering drive.
+        One of CONTRAST_WEIGHTING_POWERS' keys -- 'none' (v4's original,
+        unweighted contrast), 'sqrt' (v4.1 default), 'quarter'.
     """
 
     def __init__(self, batch: int, device: str = "cpu", dt: float = 0.5,
-                 steps_per_action: int = 20, seed: int | None = None):
+                 steps_per_action: int = 20, seed: int | None = None,
+                 contrast_weighting: str = DEFAULT_CONTRAST_WEIGHTING):
         self.batch = int(batch)
         self.device = torch.device(device)
         self.dt = float(dt)
         self.steps_per_action = int(steps_per_action)
+        if contrast_weighting not in CONTRAST_WEIGHTING_POWERS:
+            raise ValueError(
+                f"contrast_weighting must be one of {sorted(CONTRAST_WEIGHTING_POWERS)}, "
+                f"got {contrast_weighting!r}"
+            )
+        self.contrast_weighting = contrast_weighting
+        self._contrast_weight_power = CONTRAST_WEIGHTING_POWERS[contrast_weighting]
 
         self.fb = FastBrain(batch=self.batch, device=device, dt=dt, seed=seed)
 
@@ -402,8 +515,9 @@ class BrainPolicy:
         """theta: (B, N_PARAMS) array-like (numpy or torch). Parameters of
         batch row i only ever affect BrainPolicy.act's output for batch
         row i (no cross-batch mixing anywhere in encoder/decoder). Flat
-        layout (see module docstring): steering block (19) first, then the
-        6-group contact/intero block (12), then the decoder (W_dec, b_dec).
+        layout (see module docstring): steering block (19, or 22 if
+        ADD_STOP_ON_CONTACT) first, then the 6-group contact/intero block
+        (12), then the decoder (W_dec, b_dec).
         """
         theta = torch.as_tensor(theta, dtype=torch.float32, device=self.device)
         assert theta.shape == (self.batch, self.n_params), (
@@ -422,6 +536,11 @@ class BrainPolicy:
         off += N_STEER_SOURCES * N_STEER_STATES
         self.h_steer = theta[:, off:off + N_STEER_STATES]
         off += N_STEER_STATES
+        if ADD_STOP_ON_CONTACT:
+            self.g_stop = theta[:, off:off + _N_STOP_ON_CONTACT_PARAMS]
+            off += _N_STOP_ON_CONTACT_PARAMS
+        else:
+            self.g_stop = None
         assert off == N_STEER_PARAMS
 
         self.w_contact = theta[:, off:off + N_CONTACT_GROUPS]
@@ -462,11 +581,22 @@ class BrainPolicy:
         C = (L - R) / (L + R + _CONTRAST_EPS)  # (B, 3) bilateral contrast per source
         state = obs_t[:, _STATE_OBS_IDX]  # (B, 3): hunger, nicotine, withdrawal
 
+        # v4.1: weight each source's contrast by its own intensity so a
+        # far/faint source's contrast contributes less than a near/strong
+        # one's (fixes the 3-source bearing-averaging failure mode -- see
+        # module docstring). contrast_weighting='none' recovers v4 exactly
+        # (W == 1 always).
+        if self._contrast_weight_power is None:
+            WC = C
+        else:
+            W = torch.clamp((L + R) * 0.5, min=0.0) ** self._contrast_weight_power  # (B, 3), 0 when L=R=0
+            WC = W * C
+
         term_a_L = (self.a_steer * L).sum(dim=1)   # (B,)
         term_a_R = (self.a_steer * R).sum(dim=1)   # (B,)
-        term_c = (self.c_steer * C).sum(dim=1)     # (B,)
+        term_c = (self.c_steer * WC).sum(dim=1)    # (B,)
         inner = torch.einsum("bks,bs->bk", self.m_steer, state)  # (B, 3) over src k
-        term_m = (inner * C).sum(dim=1)            # (B,)
+        term_m = (inner * WC).sum(dim=1)           # (B,)
         term_h = (self.h_steer * state).sum(dim=1)  # (B,)
         b = self.b_steer.squeeze(1)                # (B,)
 
@@ -548,6 +678,19 @@ class BrainPolicy:
 
         pre_dec = torch.einsum("bof,bf->bo", self.W_dec, features_full) + self.b_dec  # (B, 2)
         action = torch.tanh(pre_dec)
+
+        if ADD_STOP_ON_CONTACT:
+            # Motor-side reflex (outside the brain, see ADD_STOP_ON_CONTACT
+            # docstring): dampen the DECODER's own forward-speed output by
+            # (1 - sum_k g_k * taste_k) using the raw taste/jackpot obs
+            # channels directly (sugar_taste, nicotine_taste, reels_jackpot),
+            # so the fly slows/stops on contact instead of walking through
+            # a source. Turn output is untouched.
+            taste = obs_t[:, _TASTE_OBS_IDX]  # (B, 3)
+            stop_factor = 1.0 - (self.g_stop * taste).sum(dim=1)  # (B,)
+            forward = torch.clamp(action[:, 1] * stop_factor, -1.0, 1.0)
+            action = torch.stack([action[:, 0], forward], dim=1)
+
         return action.cpu().numpy()
 
     def features(self) -> np.ndarray:
