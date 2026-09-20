@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 
 from flyrl.addiction_env import VecFlyAddictionEnv, addiction_metrics
-from flyrl.policy import BrainPolicy
+from flyrl.policy import BrainPolicy, DEFAULT_CONTRAST_WEIGHTING
 
 AT_CODE = {None: 0, "food": 1, "smoke": 2, "reels": 3}
 
@@ -53,14 +53,26 @@ def _load_ckpt(ckpt_path: Path):
     return config, mean_theta
 
 
-def run_eval(ckpt_path, episodes: int, seed_base: int = 2000, save_traj: bool = True):
+def run_eval(ckpt_path, episodes: int, seed_base: int = 2000, save_traj: bool = True,
+             threads: int | None = None):
     ckpt_path = Path(ckpt_path)
     run_dir = ckpt_path.parent
     config, mean_theta = _load_ckpt(ckpt_path)
 
+    if threads is not None:
+        import torch
+        torch.set_num_threads(int(threads))
+
+    # v4.1: BrainPolicy's steering encoder weights each source's bilateral
+    # contrast by intensity (contrast_weighting, default 'sqrt') -- must
+    # match whatever the checkpoint was TRAINED with (saved in its own
+    # config_json), or the loaded mean_theta is being evaluated through a
+    # different encoder nonlinearity than it was optimized for.
+    contrast_weighting = config.get("contrast_weighting", DEFAULT_CONTRAST_WEIGHTING)
     policy = BrainPolicy(batch=episodes, device=config.get("device", "cpu"),
                           dt=config.get("dt", 0.5), steps_per_action=config.get("steps_per_action", 20),
-                          seed=config.get("seed", 0) + 777)
+                          seed=config.get("seed", 0) + 777,
+                          contrast_weighting=contrast_weighting)
     n_steps = int(config.get("n_steps", 300))
     env = VecFlyAddictionEnv(num_envs=episodes, n_steps=n_steps)
 
@@ -135,10 +147,15 @@ def main(argv=None):
     parser.add_argument("--episodes", type=int, default=8)
     parser.add_argument("--seed-base", type=int, default=2000)
     parser.add_argument("--no-traj", action="store_true")
+    parser.add_argument("--threads", type=int, default=None,
+                         help="torch.set_num_threads() cap, e.g. to avoid "
+                              "hogging cores from a concurrent training run "
+                              "(default: torch's own default)")
     args = parser.parse_args(argv)
 
     metrics_list, returns, first_thirds, last_thirds, dan_by_at = run_eval(
-        args.ckpt, args.episodes, seed_base=args.seed_base, save_traj=not args.no_traj)
+        args.ckpt, args.episodes, seed_base=args.seed_base, save_traj=not args.no_traj,
+        threads=args.threads)
 
     run_name = Path(args.ckpt).parent.name
     row = {

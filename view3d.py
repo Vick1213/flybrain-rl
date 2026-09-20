@@ -32,12 +32,13 @@ import time
 
 import mujoco
 import mujoco.viewer
+import numpy as np
 
 from fly3d.scene import (
     AddictionScene3D,
     _STAGE_FOOD_XY, _STAGE_SMOKE_XY, _STAGE_REELS_XY,
     _staged_segments, _state_at, _wrap_angle,
-    load_flyrl_modules, _make_policy,
+    load_flyrl_modules, _make_policy, _TRAJ_AT_NAME,
 )
 
 
@@ -119,6 +120,56 @@ def run_episode_loop(scene: AddictionScene3D, policy_name: str, seed: int,
             prev_x, prev_y, prev_h = new_x, new_y, new_h
 
 
+def run_trajectory_loop(scene: AddictionScene3D, traj_path: str,
+                        max_seconds: float | None, fps: int = 30,
+                        frames_per_step: int = 3):
+    """Drive the viewer from a saved trajectory .npz (a `flyrl.evaluate`
+    traj_seed<k>.npz -- see its module docstring for the array format),
+    in real time, interpolating `frames_per_step` frames per logged step
+    -- same as `run_episode_loop`, but replaying a BRAIN-DRIVEN fly's
+    logged trajectory from disk instead of stepping a live scripted policy.
+    """
+    data = np.load(traj_path)
+    x, y, heading, at_code = data["x"], data["y"], data["heading"], data["at"]
+    h, n, tau, jackpot = data["h"], data["n"], data["tau"], data["jackpot"]
+    n_steps = len(x)
+
+    scene.set_sources(data["source_food"], data["source_smoke"], data["source_reels"])
+
+    prev_x, prev_y, prev_h = float(x[0]), float(y[0]), float(heading[0])
+    t = 0.0
+    dt_frame = 1.0 / fps
+    start = time.time()
+
+    with mujoco.viewer.launch_passive(scene.m, scene.d) as viewer:
+        for i in range(n_steps):
+            if not viewer.is_running():
+                return
+            new_x, new_y, new_h = float(x[i]), float(y[i]), float(heading[i])
+            dh = _wrap_angle(new_h - prev_h)
+            for k in range(frames_per_step):
+                loop_t0 = time.time()
+                frac = (k + 1) / frames_per_step
+                ix = prev_x + (new_x - prev_x) * frac
+                iy = prev_y + (new_y - prev_y) * frac
+                ih = _wrap_angle(prev_h + dh * frac)
+                t += dt_frame
+                is_last = k == frames_per_step - 1
+                scene.set_state(ix, iy, ih, at=_TRAJ_AT_NAME.get(int(at_code[i])),
+                                hunger=float(h[i]), nicotine=float(n[i]), tolerance=float(tau[i]),
+                                jackpot=bool(jackpot[i]) and is_last, t=t)
+                if scene._reels_names:
+                    viewer.update_texture(scene.ids.reels_tex_id)
+                viewer.sync()
+
+                if max_seconds is not None and (time.time() - start) >= max_seconds:
+                    return
+                if not viewer.is_running():
+                    return
+                time.sleep(max(0.0, dt_frame - (time.time() - loop_t0)))
+            prev_x, prev_y, prev_h = new_x, new_y, new_h
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", default=None,
@@ -126,6 +177,10 @@ def main():
                         help="scripted policy to run on the real 2D env; "
                              "omit to loop the hand-authored staged demo instead")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--traj", default=None,
+                        help="replay a saved flyrl.evaluate trajectory .npz "
+                             "(a BRAIN-DRIVEN fly) interactively, instead of "
+                             "the staged demo or a scripted policy")
     parser.add_argument("--max-seconds", type=float, default=None,
                         help="exit automatically after this many seconds "
                              "(used for headless smoke-testing; interactive "
@@ -133,7 +188,9 @@ def main():
     args = parser.parse_args()
 
     scene = AddictionScene3D(create_renderer=False)
-    if args.policy is None:
+    if args.traj is not None:
+        run_trajectory_loop(scene, args.traj, max_seconds=args.max_seconds)
+    elif args.policy is None:
         run_staged_loop(scene, max_seconds=args.max_seconds)
     else:
         run_episode_loop(scene, args.policy, args.seed, max_seconds=args.max_seconds)

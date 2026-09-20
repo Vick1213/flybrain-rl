@@ -1137,6 +1137,43 @@ class AddictionScene3D:
     _last_nicotine = 0.0
     _last_tolerance = 0.0
 
+    # ------------------------------------------------------------------
+    def _draw_caption(self, img: np.ndarray, title: Optional[str]) -> np.ndarray:
+        """Draws a small two-line caption centred at the bottom of the
+        frame: `title` (e.g. "ADDICTED FLY -- trained on hijacked dopamine
+        signal") plus a fixed connectome-provenance line underneath it.
+        Positioned bottom-centre -- clear of the HUD panel, which is
+        top-left -- so the two never overlap. No-op if `title` is falsy.
+        """
+        if not title:
+            return img
+        subtitle = "steered by a frozen FlyWire connectome (138,639 neurons)"
+        im = Image.fromarray(img).convert("RGBA")
+        overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        W, H = im.size
+
+        title_bbox = draw.textbbox((0, 0), title, font=self._font)
+        sub_bbox = draw.textbbox((0, 0), subtitle, font=self._font_small)
+        title_h = title_bbox[3] - title_bbox[1]
+        sub_h = sub_bbox[3] - sub_bbox[1]
+        pad_x, pad_y, line_gap = 16, 8, 4
+        block_w = max(title_bbox[2] - title_bbox[0], sub_bbox[2] - sub_bbox[0]) + 2 * pad_x
+        block_w = min(block_w, W - 24)
+        block_h = title_h + sub_h + line_gap + 2 * pad_y
+
+        x0 = max(12.0, (W - block_w) / 2.0)
+        y1 = H - 12
+        y0 = y1 - block_h
+        draw.rounded_rectangle([x0, y0, x0 + block_w, y1], radius=8, fill=(8, 8, 12, 175))
+        draw.text((x0 + pad_x, y0 + pad_y - title_bbox[1]), title,
+                  font=self._font, fill=(255, 255, 255, 255))
+        draw.text((x0 + pad_x, y0 + pad_y + title_h + line_gap - sub_bbox[1]), subtitle,
+                  font=self._font_small, fill=(205, 205, 212, 235))
+
+        composed = Image.alpha_composite(im, overlay).convert("RGB")
+        return np.asarray(composed)
+
 
 # --------------------------------------------------------------------------
 # Episode rendering (drives the real 2D FlyAddictionEnv + a scripted policy)
@@ -1160,17 +1197,89 @@ def _make_policy(policy_name: str, seed: int):
     raise ValueError(f"unknown policy_name {policy_name!r}")
 
 
+def _render_animated(scene: "AddictionScene3D", out: str, step_iter, fps: int = 30,
+                     camera: str = "auto", frames_per_step: int = 3,
+                     title: Optional[str] = None, max_seconds: Optional[float] = None,
+                     init_xyh: Optional[tuple] = None):
+    """Shared frame-interpolation + gait/activity-animation + HUD(+caption)
+    + mp4-writing loop, used by both `render_episode` (a live scripted-
+    policy rollout) and `render_trajectory` (replaying a saved
+    flyrl.evaluate trajectory from a trained BrainPolicy).
+
+    `step_iter` yields one dict per env step, in order, each with keys
+    x, y, heading (env-space, [0,1]^2 / radians), at, hunger, nicotine,
+    tolerance, jackpot -- i.e. exactly `env.step()`'s per-step outputs
+    (live or logged). `frames_per_step` sub-frames are interpolated
+    between consecutive steps' (x, y, heading), same as the original
+    render_episode.
+
+    `init_xyh`, if given, seeds the position interpolated *into* the first
+    yielded step (e.g. the env's reset pose, so the very first step's walk
+    is visible); otherwise the first step's own (x, y, heading) is used as
+    its own predecessor (a static first step, no teleport-in) -- the right
+    default when no pre-step-0 pose is available, as with a saved
+    trajectory file.
+    """
+    import imageio
+
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    writer = imageio.get_writer(out, fps=fps, codec="libx264",
+                                quality=None, bitrate=None,
+                                macro_block_size=1,
+                                output_params=["-pix_fmt", "yuv420p", "-crf", "20"])
+
+    dt_frame = 1.0 / fps
+    t = 0.0
+    n_frames = 0
+    n_steps = 0
+    have_prev = init_xyh is not None
+    prev_x, prev_y, prev_h = init_xyh if have_prev else (0.0, 0.0, 0.0)
+    try:
+        for st in step_iter:
+            x, y, heading = float(st["x"]), float(st["y"]), float(st["heading"])
+            if not have_prev:
+                prev_x, prev_y, prev_h = x, y, heading
+                have_prev = True
+            dh = _wrap_angle(heading - prev_h)
+            n_steps += 1
+            stop = False
+            for k in range(frames_per_step):
+                frac = (k + 1) / frames_per_step
+                ix = prev_x + (x - prev_x) * frac
+                iy = prev_y + (y - prev_y) * frac
+                ih = _wrap_angle(prev_h + dh * frac)
+                t += dt_frame
+                is_last = (k == frames_per_step - 1)
+                scene.set_state(ix, iy, ih, at=st.get("at"),
+                                hunger=st.get("hunger", 0.0), nicotine=st.get("nicotine", 0.0),
+                                tolerance=st.get("tolerance", 0.0),
+                                jackpot=bool(st.get("jackpot", False)) and is_last, t=t)
+                frame = scene.render(camera=camera)
+                if title:
+                    frame = scene._draw_caption(frame, title)
+                writer.append_data(frame)
+                n_frames += 1
+                if max_seconds is not None and t >= max_seconds:
+                    stop = True
+                    break
+            prev_x, prev_y, prev_h = x, y, heading
+            if stop:
+                break
+    finally:
+        writer.close()
+    return {"out": out, "n_steps": n_steps, "n_frames": n_frames, "duration_s": n_frames / fps}
+
+
 def render_episode(policy_name: str = "greedy", seed: int = 0,
                    out: str = "renders/episode.mp4", fps: int = 30,
                    camera: str = "auto", frames_per_step: int = 3,
-                   scene: Optional["AddictionScene3D"] = None):
+                   scene: Optional["AddictionScene3D"] = None,
+                   title: Optional[str] = None, max_seconds: Optional[float] = None):
     """Run one scripted-policy episode of FlyAddictionEnv and render it to
     an mp4, interpolating `frames_per_step` rendered frames per env step
     for smooth motion. `camera='auto'`: orbit while walking, cut to
     closeup while at a source.
     """
-    import imageio
-
     addiction_env, _ = load_flyrl_modules()
     env = addiction_env.FlyAddictionEnv()
     policy = _make_policy(policy_name, seed)
@@ -1180,45 +1289,64 @@ def render_episode(policy_name: str = "greedy", seed: int = 0,
     if scene is None:
         scene = AddictionScene3D()
     scene.set_sources(env.sources["food"], env.sources["smoke"], env.sources["reels"])
+    init_xyh = (float(env.pos[0]), float(env.pos[1]), float(env.theta))
 
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    writer = imageio.get_writer(out, fps=fps, codec="libx264",
-                                quality=None, bitrate=None,
-                                macro_block_size=1,
-                                output_params=["-pix_fmt", "yuv420p", "-crf", "20"])
+    state = {"obs": obs, "info": info}
 
-    prev_x, prev_y, prev_h = float(env.pos[0]), float(env.pos[1]), float(env.theta)
-    t = 0.0
-    dt_frame = 1.0 / fps
-    terminated = truncated = False
-    n_steps = 0
-    try:
+    def step_iter():
+        terminated = truncated = False
         while not (terminated or truncated):
-            action = policy.act(obs, info)
+            action = policy.act(state["obs"], state["info"])
             obs, reward, terminated, truncated, info = env.step(action)
             if hasattr(policy, "update"):
                 policy.update(info.get("at"), reward)
-            n_steps += 1
+            state["obs"], state["info"] = obs, info
+            yield dict(x=float(env.pos[0]), y=float(env.pos[1]), heading=float(env.theta),
+                       at=info.get("at"), hunger=info.get("h", 0.0), nicotine=info.get("n", 0.0),
+                       tolerance=info.get("tau", 0.0), jackpot=bool(info.get("jackpot", False)))
 
-            new_x, new_y, new_h = float(env.pos[0]), float(env.pos[1]), float(env.theta)
-            dh = _wrap_angle(new_h - prev_h)
-            for k in range(frames_per_step):
-                frac = (k + 1) / frames_per_step
-                ix = prev_x + (new_x - prev_x) * frac
-                iy = prev_y + (new_y - prev_y) * frac
-                ih = _wrap_angle(prev_h + dh * frac)
-                t += dt_frame
-                is_last = (k == frames_per_step - 1)
-                scene.set_state(ix, iy, ih, at=info.get("at"),
-                                hunger=info.get("h", 0.0), nicotine=info.get("n", 0.0),
-                                tolerance=info.get("tau", 0.0),
-                                jackpot=bool(info.get("jackpot", False)) and is_last, t=t)
-                writer.append_data(scene.render(camera=camera))
-            prev_x, prev_y, prev_h = new_x, new_y, new_h
-    finally:
-        writer.close()
-    return {"out": out, "n_steps": n_steps, "n_frames": n_steps * frames_per_step,
-            "duration_s": n_steps * frames_per_step / fps}
+    return _render_animated(scene, out, step_iter(), fps=fps, camera=camera,
+                            frames_per_step=frames_per_step, title=title,
+                            max_seconds=max_seconds, init_xyh=init_xyh)
+
+
+_TRAJ_AT_NAME = {0: None, 1: "food", 2: "smoke", 3: "reels"}
+
+
+def render_trajectory(traj_path: str, out: str, fps: int = 30, camera: str = "auto",
+                      frames_per_step: int = 3, title: Optional[str] = None,
+                      max_seconds: Optional[float] = None,
+                      scene: Optional["AddictionScene3D"] = None):
+    """Replay a saved trajectory (a ``flyrl.evaluate`` ``traj_seed<k>.npz``
+    -- see its module docstring for the exact array format: x, y, heading,
+    at, h, n, tau, w, jackpot, reward, source_food/smoke/reels) with the
+    same per-frame interpolation, walking gait, activity animation and HUD
+    as `render_episode` -- but driven by a real trained BrainPolicy's
+    logged trajectory (a BRAIN-DRIVEN fly) instead of a live scripted
+    policy. `title`, if given (e.g. "ADDICTED FLY -- trained on hijacked
+    dopamine signal"), is drawn as a small caption at the bottom of the
+    frame alongside a fixed connectome-provenance line -- see
+    `AddictionScene3D._draw_caption`.
+    """
+    data = np.load(traj_path)
+    x, y, heading, at_code = data["x"], data["y"], data["heading"], data["at"]
+    h, n, tau, jackpot = data["h"], data["n"], data["tau"], data["jackpot"]
+    n_steps = len(x)
+
+    if scene is None:
+        scene = AddictionScene3D()
+    scene.set_sources(data["source_food"], data["source_smoke"], data["source_reels"])
+
+    def step_iter():
+        for i in range(n_steps):
+            yield dict(x=float(x[i]), y=float(y[i]), heading=float(heading[i]),
+                       at=_TRAJ_AT_NAME.get(int(at_code[i])), hunger=float(h[i]),
+                       nicotine=float(n[i]), tolerance=float(tau[i]),
+                       jackpot=bool(jackpot[i]))
+
+    return _render_animated(scene, out, step_iter(), fps=fps, camera=camera,
+                            frames_per_step=frames_per_step, title=title,
+                            max_seconds=max_seconds)
 
 
 # --------------------------------------------------------------------------
@@ -1387,10 +1515,22 @@ def render_staged_stills(out_dir: str = "renders", scene: Optional["AddictionSce
 def _main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["stills", "demo", "episode", "all"], default="all")
+    parser.add_argument("--mode", choices=["stills", "demo", "episode", "traj", "all"], default="all")
     parser.add_argument("--policy", default="greedy")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out-dir", default="renders")
+    parser.add_argument("--traj", default=None,
+                        help="path to a flyrl.evaluate traj_seed*.npz (--mode traj)")
+    parser.add_argument("--out", default=None,
+                        help="output mp4 path (--mode traj; default <out-dir>/traj.mp4)")
+    parser.add_argument("--title", default=None,
+                        help="caption title drawn at the bottom of the frame (--mode traj)")
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--camera", default="auto",
+                        choices=["auto", "orbit", "closeup", "top"])
+    parser.add_argument("--frames-per-step", type=int, default=3)
+    parser.add_argument("--max-seconds", type=float, default=None,
+                        help="truncate the render after this many seconds of output video")
     args = parser.parse_args()
 
     if args.mode in ("stills", "all"):
@@ -1403,6 +1543,13 @@ def _main():
         info = render_episode(policy_name=args.policy, seed=args.seed,
                               out=os.path.join(args.out_dir, f"episode_{args.policy}.mp4"))
         print("episode:", info)
+    if args.mode == "traj":
+        assert args.traj, "--traj <path to traj_seed*.npz> is required for --mode traj"
+        out = args.out or os.path.join(args.out_dir, "traj.mp4")
+        info = render_trajectory(args.traj, out, fps=args.fps, camera=args.camera,
+                                 frames_per_step=args.frames_per_step, title=args.title,
+                                 max_seconds=args.max_seconds)
+        print("trajectory:", info)
 
 
 if __name__ == "__main__":
