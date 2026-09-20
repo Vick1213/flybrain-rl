@@ -1,0 +1,44 @@
+{
+  "_comment": "Task 1 (I/O v4) decision. No new empirical screen was needed: v4 reuses LPLC4 (food_odor's v3 channel, the highest-magnitude of the three v3 directional channels -- see results/screen/io_v3_choice.json) as the SHARED steer_L/steer_R pathway for all three sources, and drops LPC2 (v3 smoke_odor) and LC10e (v3 reels_light) as anatomical entry points entirely. The readout/pool cache was rebuilt against the new 8-group input set via scripts/diag_readout.py; see results/diag_readout_decision.json and results/diag_readout.csv for the rebuilt numbers.",
+
+  "problem_being_fixed": {
+    "v3_ability_imbalance": "With I/O v3 (results/screen/io_v3_choice.json), each source had its OWN lateralized VPN population: food_odor=LPLC4 (~55 neurons/side, drives ~115 descending/motor neurons per side), smoke_odor=LPC2 (~58 neurons/side, drives only ~17 DNs per side), reels_light=LC10e (~52 neurons/side). With a DAgger-fitted decoder and the encoder fixed at init, food reached the scripted teacher's performance exactly (100% reach, matching teacher; L/R-swap control collapsed it to the forward-only baseline: 12.5% reach, distance change -0.38), while smoke reached only 47-62% and reels only 16-22% (see the task's 'Where things stand' brief and results/taxis_dagger/log.csv + controls.json). This is an anatomical STEERING-CAPACITY imbalance (how many DNs a channel drives), not a preference difference -- it would confound the addiction experiment, since a fly that can only physically steer to food would look 'sober' for the wrong reason (inability, not disinterest in drugs).",
+    "v4_fix": "Route ALL THREE sources through the SAME shared population pair (steer_L/steer_R = full LPLC4 populations, the largest-capacity channel of the three v3 options) instead of giving each source its own population. The trainable encoder (flyrl.policy) is now responsible for combining each source's L/R obs intensity + bilateral contrast + internal state into this one pair's drive (see flyrl.policy module docstring for the exact drive_L/drive_R formula). This equalizes steering ABILITY across all three sources by construction -- whatever behavioural bias ES later learns (Task 3) must then come from the encoder's trained VALUATION weights (a/c/m/h), not from which channel happens to reach more descending neurons."
+  },
+
+  "why_LPLC4_and_not_LC10e_or_a_pooled_new_channel": {
+    "LPLC4_is_the_largest_capacity_option": "Of the three v3 channels, LPLC4 (food_odor) had by far the largest DN response magnitude (123/107 responsive DN/motor neurons at 150Hz stimulation, 1466/1315 total spikes) vs LC10e (45/56 responsive, 325/325 spikes) and LPC2 (18/16 responsive, 120/115 spikes) -- see io_v3_choice.json's per-channel numbers. Since v4 needs ONE channel to carry ALL THREE sources' combined steering signal (a strictly harder job for the anatomy than carrying just one source), the highest-capacity option is the natural choice.",
+    "LC10e_has_higher_LI_but_lower_capacity": "LC10e has the best lateralization index (0.85-0.97 vs LPLC4's 0.47-0.79), but a smaller DN/motor footprint. Task 1's stated goal is fixing the CAPACITY imbalance specifically (v3's smoke/reels lagged because of DN count, not LI) -- LPLC4's larger population was judged the more direct fix. LPLC4's still-substantial LI (0.47-0.79) combined with the encoder's own bilateral-contrast term (C_src) provides the lateralization signal; the DAgger v4 run's L/R-swap control (results/taxis_dagger_v4/controls.json) directly tests whether this is enough.",
+    "no_new_pooled_channel_needed": "Spec requires 'the SAME lateralised population pair' for all three sources -- reusing an already-screened, already-validated channel (LPLC4, confirmed never to ignite at 150Hz, confirmed reproducibly lateralized) avoids introducing a new unscreened anatomical group."
+  },
+
+  "dropped_channels": {
+    "LPC2_v3_smoke_odor": "Anatomical entry point DROPPED. Its neurons are simply unused as input in v4 (no longer wired into any input group).",
+    "LC10e_v3_reels_light": "Anatomical entry point DROPPED, for the same reason."
+  },
+
+  "unchanged_from_v2_v3": [
+    "sugar_taste (21-neuron sugar GRN benchmark set)",
+    "nicotine_taste (pooled bitter GRNs)",
+    "reels_jackpot (pooled MeTu1, unsplit)",
+    "hunger (pooled octopaminergic neurons)",
+    "nicotine (pooled DAN PAM cluster)",
+    "withdrawal (pooled DAN PPL cluster, capped at 50Hz)"
+  ],
+
+  "v4_group_sizes_and_max_rates": {
+    "steer_L": {"n_neurons": 56, "max_rate_hz": 150.0},
+    "steer_R": {"n_neurons": 54, "max_rate_hz": 150.0},
+    "sugar_taste": {"n_neurons": 21, "max_rate_hz": 200.0},
+    "nicotine_taste": {"n_neurons": 65, "max_rate_hz": 150.0},
+    "reels_jackpot": {"n_neurons": 244, "max_rate_hz": 150.0},
+    "hunger": {"n_neurons": 193, "max_rate_hz": 150.0},
+    "nicotine": {"n_neurons": 307, "max_rate_hz": 150.0},
+    "withdrawal": {"n_neurons": 24, "max_rate_hz": 50.0},
+    "note": "steer_L/steer_R sizes match io_v3_choice.json's LPLC4 n_neurons exactly (56 left / 54 right) -- same anatomical population, just now shared across all three sources instead of dedicated to food_odor alone."
+  },
+
+  "readout_pools_and_z_norm": "Rebuilt via the unchanged v2/v3 procedure (scripts/diag_readout.py) against the new 8-group input set (down from 12) -- see results/diag_readout_decision.json and results/diag_readout.csv. The per-pool turn-sign (used by flyrl.policy.default_params' anatomical-prior decoder init) is now computed from the SINGLE steer_L/steer_R pair (v2/v3 averaged three L/R pairs; v4 has only one). Task 1 also extended this same script to compute FIXED z-norm stats (pool_mean_slow/pool_std_slow) for an optional tau=200ms slow-trace decoder feature (flyrl.policy.USE_SLOW_TRACE) from the same per-channel stimulation run, at negligible extra cost -- see flyrl/readout_neurons.npz and scripts/diag_readout.py's updated docstring.",
+
+  "dan_logging_note": "This connectome's entire DAN (dopaminergic) population (331 neurons) is exhausted by the PAM cluster (307, = the 'nicotine' input group) and the PPL cluster (24, = the 'withdrawal' input group) -- there is no third DAN subtype present in the annotation table. Task 1's dan_rate_driven/dan_rate_other split (flyrl.policy.BrainPolicy.dan_rate_driven_hz/mean_dan_rate_hz) is implemented and correct, but dan_rate_other is therefore always 0 for this specific connectome: every DAN neuron IS a directly-driven input neuron. This is a fact about the annotation data, not a bug in the split logic."
+}

@@ -1,0 +1,117 @@
+{
+  "bypass_brain_ceiling": {
+    "lambda": 10.0,
+    "r2_turn": 0.05934862591042156,
+    "r2_forward": 0.7274210459523837,
+    "n_train": 8640,
+    "n_val": 2880,
+    "note": "ridge decoder fit on raw encoder group-rates (8-dim) passed through the same tau=50ms leaky-trace recursion the brain readout uses, BYPASSING the frozen brain entirely."
+  },
+  "final_decoder_fast_trace_only_val_r2": {
+    "r2_turn": 0.12808149573486993,
+    "r2_forward": 0.5813095350895623
+  },
+  "slow_trace_ablation": {
+    "lambda": 3.0,
+    "r2_turn": 0.12798840223534258,
+    "r2_forward": 0.5814148614659593,
+    "adopted": false,
+    "note": "tau=50ms (64, z-normed via fixed screen stats) concatenated with tau=200ms (64, z-normed via fixed screen stats pool_mean_slow/pool_std_slow) -> 128 features. If mean R^2 improves by > 0.03 over fast-trace-only, flyrl.policy.USE_SLOW_TRACE must be set True and this run re-launched from scratch so the DAgger decoder is actually fit at feature dim 128 (no half-measures -- this script only REPORTS the ablation, it does not flip the flag or refit itself)."
+  },
+  "lr_swap_sanity_check": {
+    "food": {
+      "normal": {
+        "reach_rate": 1.0,
+        "mean_dist_reduction": 0.34058335072789936
+      },
+      "swapped": {
+        "reach_rate": 0.09375,
+        "mean_dist_reduction": -0.37938043029622626
+      }
+    },
+    "smoke": {
+      "normal": {
+        "reach_rate": 1.0,
+        "mean_dist_reduction": 0.3706123312638861
+      },
+      "swapped": {
+        "reach_rate": 0.0,
+        "mean_dist_reduction": -0.4436830096600586
+      }
+    },
+    "reels": {
+      "normal": {
+        "reach_rate": 1.0,
+        "mean_dist_reduction": 0.31829928076686587
+      },
+      "swapped": {
+        "reach_rate": 0.03125,
+        "mean_dist_reduction": -0.1672176652138647
+      }
+    }
+  },
+  "eval_300step": {
+    "food": {
+      "reach_rate": 1.0,
+      "mean_dist_reduction": 0.34925918963883595
+    },
+    "smoke": {
+      "reach_rate": 1.0,
+      "mean_dist_reduction": 0.3802324809249721
+    },
+    "reels": {
+      "reach_rate": 1.0,
+      "mean_dist_reduction": 0.3160917287949804
+    }
+  },
+  "no_signal_search_diagnostic": {
+    "food": {
+      "frac_steps_no_signal": 0.0,
+      "mean_abs_turn_when_no_signal": NaN,
+      "mean_abs_turn_when_signal": 0.3380100131034851,
+      "n_no_signal_samples": 0
+    },
+    "smoke": {
+      "frac_steps_no_signal": 0.0,
+      "mean_abs_turn_when_no_signal": NaN,
+      "mean_abs_turn_when_signal": 0.32681670784950256,
+      "n_no_signal_samples": 0
+    },
+    "reels": {
+      "frac_steps_no_signal": 0.2634375,
+      "mean_abs_turn_when_no_signal": 0.47736746072769165,
+      "mean_abs_turn_when_signal": 0.4253290295600891,
+      "n_no_signal_samples": 2529
+    }
+  },
+  "baselines": {
+    "teacher": {
+      "food": {
+        "reach_rate": 1.0,
+        "mean_dist_reduction": 0.306258966382381
+      },
+      "smoke": {
+        "reach_rate": 1.0,
+        "mean_dist_reduction": 0.3333799961279752
+      },
+      "reels": {
+        "reach_rate": 1.0,
+        "mean_dist_reduction": 0.3762358958003652
+      }
+    },
+    "forward": {
+      "food": {
+        "reach_rate": 0.09375,
+        "mean_dist_reduction": -0.3796143669957388
+      },
+      "smoke": {
+        "reach_rate": 0.03125,
+        "mean_dist_reduction": -0.37180156696898303
+      },
+      "reels": {
+        "reach_rate": 0.09375,
+        "mean_dist_reduction": -0.2895116427823219
+      }
+    }
+  }
+}

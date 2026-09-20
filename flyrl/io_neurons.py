@@ -17,36 +17,50 @@ for interoceptive/taste/jackpot channels, but still routed food_odor/
 smoke_odor through olfactory ALPN glomeruli (DC4/DA2) -- see
 results/screen/io_v2_choice.json.
 
-v3 (this version, Task 1) replaces BOTH odour channels with visual-
-projection (VPN) channels too, so that ALL THREE directional sources
-(food, smoke, reels) now enter the brain through the same anatomical
-*class* of entry point. Rationale (see results/screen/io_v3_choice.json for
-the full data-backed justification): a wider re-screen confirmed that
-*every* ORN glomerulus ignites the whole network at rates as low as 1-2 Hz,
-and ALPN (projection-neuron) ignition is a chaotic, RNG-history-dependent
-threshold phenomenon that is not reproducible -- olfactory input is
-degenerate/unusable for steering in this connectome (odour identity and
-side are lost once the network ignites). visual_projection (VPN) types,
-by contrast, never ignite (0/69 types tested, both 50 and 150 Hz) and
-several are strongly and reproducibly lateralized. v3 therefore senses
-food_odor and smoke_odor -- despite their env-level names, which are kept
-unchanged as obs-channel identifiers only, see ``GROUP_NAMES`` -- through
-two more VPN cell types (LPLC4 for food, LPC2 for smoke), chosen to
-maximise |LI|, DN response magnitude, mirror consistency and pairwise
-distinctness from each other, from reels_light's existing LC10e channel,
-and from reels_jackpot's existing MeTu1 channel. Obs channel *names* are
-unchanged (they are defined by flyrl.addiction_env.FlyAddictionEnv and
-that file is not modified) -- only the anatomical entry-point neurons
-change.
+v3 replaced BOTH odour channels with visual-projection (VPN) channels too,
+so that all three directional sources (food, smoke, reels) entered the
+brain through the same anatomical *class* of entry point, but each source
+still had its OWN dedicated lateralized population (LPLC4 for food, LPC2
+for smoke, LC10e for reels) -- see results/screen/io_v3_choice.json. With
+I/O v3, the food channel (LPLC4, the largest-magnitude of the three, ~115
+descending/motor neurons driven per side) steered through the brain as
+well as the scripted teacher, but the smoke channel (LPC2, only ~17 DNs
+driven) and reels channel (LC10e) steered much worse -- an ability
+imbalance that would confound the addiction experiment (a fly that can
+only walk to food looks "sober" for the wrong reason, not because it
+values food over drugs).
+
+v4 (this version, Task 1) fixes that imbalance structurally: ALL THREE
+directional sources now drive the SAME shared lateralized population pair
+-- visual_projection LPLC4, full left/right populations (the single
+highest-magnitude, never-igniting VPN channel found in the v2/v3 screens,
+see io_v3_choice.json) -- instead of each source getting its own
+anatomical population. The LPC2 (v3 smoke) and LC10e (v3 reels) groups are
+DROPPED entirely; the trainable encoder (flyrl.policy) is responsible for
+combining all three sources' L/R intensities (plus internal state) into a
+single drive_L/drive_R pair that sets this one shared population's firing
+rate, so "which source I steer toward" becomes a question of encoder
+*valuation* weights (trainable, and hence where addiction/preference can
+live) rather than which anatomical channel happens to carry the strongest
+signal. Contact/interoceptive channels (sugar_taste, nicotine_taste,
+reels_jackpot, hunger, nicotine, withdrawal) are UNCHANGED from v2/v3.
+Obs channel *names* are unchanged (they are defined by
+flyrl.addiction_env.FlyAddictionEnv and that file is not modified) --
+FlyAddictionEnv still emits food_odor_L/R, smoke_odor_L/R, reels_light_L/R
+etc. as before; only the anatomical entry-point neurons and how many
+distinct anatomical groups obs channels map onto have changed.
 
 Two kinds of index sets are built:
 
-  1. Anatomical INPUT groups, one per FlyAddictionEnv observation channel
-     (see ``GROUP_NAMES`` == ``FlyAddictionEnv.obs_channels``), each a
-     specific empirically-chosen population (e.g. visual_projection LPC2
-     for smoke_odor, visual_projection LC10e for reels_light -- see
-     ``GROUP_MAX_RATE_HZ`` below and ``_build_groups_uncached``). Cached to
-     ``flyrl/io_neurons.npz`` the first time they are built.
+  1. Anatomical INPUT groups (see ``GROUP_NAMES`` below) -- v4 has 8, not
+     one per obs channel: the two lateralized steering groups ``steer_L``/
+     ``steer_R`` (visual_projection LPLC4, shared by all three directional
+     sources -- the encoder decides how each source's L/R obs intensities
+     and the internal state channels combine into this one pair's drive)
+     plus the six unchanged own-channel contact/interoceptive groups
+     (sugar_taste, nicotine_taste, reels_jackpot, hunger, nicotine,
+     withdrawal). Cached to ``flyrl/io_neurons.npz`` the first time they
+     are built.
 
   2. READOUT candidates (all descending+motor neurons, with cell_type+side,
      plus DAN indices for logging) used by ``scripts/diag_readout.py`` to
@@ -119,62 +133,53 @@ SUGAR_GRN_IDS = tuple(EXPERIMENTS["sugar"]["neu_exc"])
 # of the spec: "bitter GRNs if identifiable else other gustatory neurons").
 
 GROUP_NAMES = [
-    "food_odor_L", "food_odor_R",
-    "smoke_odor_L", "smoke_odor_R",
-    "reels_light_L", "reels_light_R",
+    "steer_L", "steer_R",
     "sugar_taste", "nicotine_taste", "reels_jackpot",
     "hunger", "nicotine", "withdrawal",
 ]
 
 # ---------------------------------------------------------------------
-# v3 anatomical entry-point choice (Task 1), decided from the SAME
-# empirical screen used for v2 (scripts/screen_entry_points.py) -- see
-# results/screen/io_v3_choice.json for the full data-backed justification,
-# and results/screen/candidate_summary.csv / cosine_similarity.csv /
-# mirror_consistency.csv for the raw numbers. Headline reasoning:
-#   - Olfactory input (ORN or ALPN, any glomerulus) is unusable for
-#     steering in this connectome: ORN ignites the whole network at rates
-#     as low as 1-2 Hz, and ALPN ignition onset is a chaotic/RNG-history-
-#     dependent threshold phenomenon (see io_v2_choice.json). v3 drops
-#     olfactory entry points entirely.
-#   - visual_projection (VPN) NEVER ignites (0/69 types, 50 or 150 Hz) and
-#     several types are strongly, reproducibly lateralized. v3 uses THREE
-#     different VPN types, one per directional source: LC10e (reels_light,
-#     unchanged from v2 -- the best-lateralized, best-established channel,
-#     LI=0.85-0.97), LPLC4 (food_odor -- new in v3, the highest-magnitude
-#     non-LC10-family VPN type with the lowest cross-talk to LC10e/MeTu1),
-#     LPC2 (smoke_odor -- new in v3, the next-best-lateralized
-#     non-LC10-family, non-MeTu1 VPN type). reels_jackpot keeps v2's MeTu1
-#     (pooled, unsplit -- the jackpot cue is a non-lateralized scalar).
-#     NOTE: every OTHER strongly-lateralized VPN type (LC10c-1/c-2/d/a/b)
-#     is a member of the same LC10 "looming" family as LC10e and is highly
-#     correlated with it (cosine similarity 0.6-0.95 same-side) -- these
-#     were excluded from consideration as food/smoke channels precisely
-#     because they would not be pairwise-distinct from reels_light. LPLC4
-#     and LPC2 have lower |LI| than the LC10 family (0.47-0.79 and
-#     0.62-0.68 respectively, vs LC10e's 0.85-0.97) but are the best
-#     available trade-off against distinctness -- see io_v3_choice.json.
-#   - Taste/jackpot/interoceptive channels are UNCHANGED from v2: sugar
+# v4 anatomical entry-point choice (Task 1). steer_L/steer_R replace v3's
+# THREE separate lateralized pairs (food_odor LPLC4, smoke_odor LPC2,
+# reels_light LC10e) with ONE shared pair: visual_projection LPLC4, full
+# left/right populations -- the highest-magnitude, never-igniting VPN
+# channel found in the v2/v3 screens (see results/screen/io_v3_choice.json:
+# 123/107 responsive DN/motor neurons at 150Hz, vs LPC2's 18/16 and
+# LC10e's 45/56 -- LPLC4 was already the strongest of the three v3
+# channels). Rationale for pooling onto one channel instead of keeping
+# three (see results/screen/io_v4_choice.json): v3 measured that the
+# food channel (LPLC4) steered through the brain as well as the scripted
+# teacher (100% reach) while smoke (LPC2, ~17 DNs/side) and reels (LC10e)
+# reached only 47-62% and 16-22% respectively -- an anatomical-capacity
+# imbalance, not a preference difference, that would confound the
+# addiction experiment. Routing all three sources through the SAME
+# high-capacity population and letting the trainable encoder (flyrl.policy)
+# combine their L/R intensities + internal state into one drive_L/drive_R
+# pair equalizes steering *ability* across sources, so any behavioural bias
+# ES later learns reflects trained *valuation* weights, not which
+# anatomical channel happened to reach more descending neurons.
+#   - LPC2 (v3 smoke_odor) and LC10e (v3 reels_light) are DROPPED --
+#     removed as anatomical entry points entirely (still confirmed distinct
+#     from LPLC4 and MeTu1 by the v3 screen's cosine-similarity numbers,
+#     but simply unused in v4).
+#   - Taste/jackpot/interoceptive channels are UNCHANGED from v2/v3: sugar
 #     GRNs (sugar_taste), pooled bitter GRNs (nicotine_taste), pooled
 #     MeTu1 (reels_jackpot), octopaminergic (hunger), DAN PAM (nicotine),
-#     DAN PPL @<=50Hz (withdrawal) -- see io_v2_choice.json for their
-#     original justification, unaffected by the v3 odour->VPN change.
+#     DAN PPL @<=50Hz (withdrawal).
 GROUP_MAX_RATE_HZ = {
-    "food_odor_L": 150.0, "food_odor_R": 150.0,      # v3: visual_projection LPLC4 -- never ignites
-    "smoke_odor_L": 150.0, "smoke_odor_R": 150.0,    # v3: visual_projection LPC2 -- never ignites
-    "reels_light_L": 150.0, "reels_light_R": 150.0,  # visual_projection LC10e -- never ignites (unchanged)
-    "sugar_taste": 200.0,     # unchanged from v1/v2 / eon-fly-brain benchmark.py 'sugar' experiment
-    "nicotine_taste": 150.0,  # pooled bitter GRNs (unchanged from v2)
-    "reels_jackpot": 150.0,   # visual_projection MeTu1, pooled (unchanged from v2)
-    "hunger": 150.0,          # octopaminergic, pooled (unchanged from v2)
-    "nicotine": 150.0,        # DAN PAM, pooled (unchanged from v2)
-    "withdrawal": 50.0,       # DAN PPL -- ignites at 150 Hz, capped (unchanged from v2)
+    "steer_L": 150.0, "steer_R": 150.0,      # v4: visual_projection LPLC4 (shared), never ignites
+    "sugar_taste": 200.0,     # unchanged from v1/v2/v3 / eon-fly-brain benchmark.py 'sugar' experiment
+    "nicotine_taste": 150.0,  # pooled bitter GRNs (unchanged)
+    "reels_jackpot": 150.0,   # visual_projection MeTu1, pooled (unchanged)
+    "hunger": 150.0,          # octopaminergic, pooled (unchanged)
+    "nicotine": 150.0,        # DAN PAM, pooled (unchanged)
+    "withdrawal": 50.0,       # DAN PPL -- ignites at 150 Hz, capped (unchanged)
 }
 
 
 # Kept for reference/tests -- v2 used this to build the food_odor/smoke_odor
-# ALPN groups (DC4/DA2); v3 no longer calls it (see _build_groups_uncached
-# below), since io_v3_choice.json found olfactory input unusable.
+# ALPN groups (DC4/DA2); v3/v4 no longer call it, since io_v3_choice.json
+# found olfactory input unusable.
 def _alpn_uniglomerular_ids(df: pd.DataFrame, glomerulus: str, side: str) -> list:
     alpn = df[(df["cell_class"] == "ALPN") & (df["cell_sub_class"] == "uniglomerular")
               & df["cell_type"].notna()]
@@ -191,32 +196,23 @@ def _visual_type_ids(df: pd.DataFrame, cell_type: str, side: str = None) -> list
 
 
 def _build_groups_uncached(fb) -> dict:
-    """v3 anatomical input groups -- see GROUP_MAX_RATE_HZ docstring above
-    and results/screen/io_v3_choice.json for the full justification."""
+    """v4 anatomical input groups -- see GROUP_MAX_RATE_HZ docstring above
+    and results/screen/io_v4_choice.json for the full justification."""
     df = load_annotations()
-    f2i = fb.flyid_to_index
 
     def idx(ids):
         return local_indices_for_root_ids(fb, ids)
 
-    # food_odor: v3 -- visual_projection LPLC4 (odour is degenerate in this
-    # model; LPLC4 is the highest-magnitude VPN type distinct from both
-    # LC10e (reels_light) and MeTu1 (reels_jackpot); see io_v3_choice.json)
-    food_L = idx(_visual_type_ids(df, "LPLC4", "left"))
-    food_R = idx(_visual_type_ids(df, "LPLC4", "right"))
-
-    # smoke_odor: v3 -- visual_projection LPC2 (next-best-lateralized VPN
-    # type distinct from LC10e/MeTu1/LPLC4; see io_v3_choice.json)
-    smoke_L = idx(_visual_type_ids(df, "LPC2", "left"))
-    smoke_R = idx(_visual_type_ids(df, "LPC2", "right"))
-
-    # reels_light: visual_projection LC10e (strongly lateralized, never ignites; unchanged from v2)
-    reels_L = idx(_visual_type_ids(df, "LC10e", "left"))
-    reels_R = idx(_visual_type_ids(df, "LC10e", "right"))
+    # steer_L/steer_R: v4 -- visual_projection LPLC4, full populations,
+    # shared by all three directional sources (food/smoke/reels); the
+    # trainable encoder (flyrl.policy) combines each source's L/R obs
+    # intensity + internal state into this one pair's drive.
+    steer_L = idx(_visual_type_ids(df, "LPLC4", "left"))
+    steer_R = idx(_visual_type_ids(df, "LPLC4", "right"))
 
     # reels_jackpot: visual_projection MeTu1, pooled both sides (unsplit --
     # env's jackpot cue is a non-lateralized scalar flash); anatomically
-    # distinct anterior-visual pathway from the LC10e looming/motion route.
+    # distinct anterior-visual pathway from the LPLC4 route (unchanged).
     jackpot = idx(_visual_type_ids(df, "MeTu1", "left") + _visual_type_ids(df, "MeTu1", "right"))
 
     # sugar_taste: unchanged from v1 (matches eon-fly-brain benchmark.py 'sugar' experiment)
@@ -239,9 +235,7 @@ def _build_groups_uncached(fb) -> dict:
     withdrawal = idx(dan.loc[dan["grp"] == "PPL", "root_id"].tolist())
 
     groups = {
-        "food_odor_L": food_L, "food_odor_R": food_R,
-        "smoke_odor_L": smoke_L, "smoke_odor_R": smoke_R,
-        "reels_light_L": reels_L, "reels_light_R": reels_R,
+        "steer_L": steer_L, "steer_R": steer_R,
         "sugar_taste": sugar, "nicotine_taste": bitter, "reels_jackpot": jackpot,
         "hunger": hunger, "nicotine": nicotine, "withdrawal": withdrawal,
     }
@@ -255,9 +249,12 @@ def build_input_groups(fb, force_rebuild: bool = False) -> dict:
     table and fb.flyid_to_index are both fixed, so this is deterministic).
     """
     if CACHE_PATH.exists() and not force_rebuild:
-        data = np.load(CACHE_PATH)
-        groups = {name: data[f"group_{name}"].astype(np.int64) for name in GROUP_NAMES}
-        return groups
+        try:
+            data = np.load(CACHE_PATH)
+            groups = {name: data[f"group_{name}"].astype(np.int64) for name in GROUP_NAMES}
+            return groups
+        except KeyError:
+            pass  # stale cache from an earlier io_neurons version -- rebuild below
 
     groups = _build_groups_uncached(fb)
 

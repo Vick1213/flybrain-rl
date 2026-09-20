@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from flyrl.addiction_env import FlyAddictionEnv, VecFlyAddictionEnv
-from flyrl.policy import BrainPolicy, N_PARAMS, N_POOLS, N_ACTIONS
+from flyrl.policy import BrainPolicy, N_PARAMS, N_POOLS, N_FEATURES, N_GROUPS, N_ACTIONS
 from flyrl.taxis import MODALITIES, MODALITY_KEEP_CHANNELS
 from flyrl.scripted import CHANNEL_INDEX, _SOURCE_CHANNELS
 from flyrl.dagger_taxis import (
@@ -67,14 +67,14 @@ def test_bypass_tracer_matches_explicit_simulation():
     dt, steps_per_action, tau_ms = 0.5, 20, 50.0
     B = 3
     rng = np.random.default_rng(0)
-    rates = rng.uniform(0, 150, size=(B, 12)).astype(np.float64)
+    rates = rng.uniform(0, 150, size=(B, N_GROUPS)).astype(np.float64)
 
     tracer = BypassTracer(batch=B, dt=dt, steps_per_action=steps_per_action, tau_ms=tau_ms)
     tracer.reset()
     got = tracer.step(rates)
 
     decay_sub = np.exp(-dt / tau_ms)
-    manual = np.zeros((B, 12), dtype=np.float64)
+    manual = np.zeros((B, N_GROUPS), dtype=np.float64)
     for _ in range(steps_per_action):
         manual = manual * decay_sub + rates * (dt / 1000.0)
 
@@ -89,10 +89,10 @@ def test_bypass_tracer_matches_explicit_simulation():
 
 def test_bypass_tracer_reset_zeroes_state():
     tracer = BypassTracer(batch=2, dt=0.5, steps_per_action=20)
-    tracer.step(np.full((2, 12), 100.0))
+    tracer.step(np.full((2, N_GROUPS), 100.0))
     assert np.any(tracer.trace != 0.0)
     tracer.reset()
-    np.testing.assert_array_equal(tracer.trace, np.zeros((2, 12)))
+    np.testing.assert_array_equal(tracer.trace, np.zeros((2, N_GROUPS)))
 
 
 # ---------------------------------------------------------------------
@@ -159,7 +159,7 @@ def test_assemble_theta_shape_and_settable():
     enc_block = fixed_encoder_block(seed=0)
     assert enc_block.shape == (N_ENC_PARAMS,)
     W_dec, b_dec = zero_decoder_Wb()
-    assert W_dec.shape == (N_POOLS, N_ACTIONS)
+    assert W_dec.shape == (N_FEATURES, N_ACTIONS)
     theta = assemble_theta(enc_block, W_dec, b_dec)
     assert theta.shape == (N_PARAMS,)
     assert theta.dtype == np.float32
@@ -183,7 +183,7 @@ def test_brainpolicy_features_shape_and_finite():
     pol.act(obs)
     feats = pol.features()
     feats_slow = pol.features_slow_raw()
-    assert feats.shape == (B, N_POOLS)
+    assert feats.shape == (B, N_FEATURES)
     assert feats_slow.shape == (B, N_POOLS)
     assert np.all(np.isfinite(feats))
     assert np.all(np.isfinite(feats_slow))
@@ -207,7 +207,7 @@ def test_collect_iteration_tiny_shapes():
                               beta=1.0, seed=123, n_substeps=n_substeps, rng=rng)
 
     n_expected = n_substeps * B * len(MODALITIES)
-    assert data.X_fast.shape == (n_expected, N_POOLS)
+    assert data.X_fast.shape == (n_expected, N_FEATURES)
     assert data.X_slow_raw.shape == (n_expected, N_POOLS)
     assert data.Y_raw.shape == (n_expected, 2)
     assert np.all(np.isfinite(data.X_fast))

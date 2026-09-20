@@ -81,7 +81,8 @@ def run_eval(ckpt_path, episodes: int, seed_base: int = 2000, save_traj: bool = 
         "w": np.zeros((B, T), dtype=np.float32),
         "jackpot": np.zeros((B, T), dtype=bool),
         "reward": np.zeros((B, T), dtype=np.float32),
-        "dan_rate_hz": np.zeros((B, T), dtype=np.float32),
+        "dan_rate_hz": np.zeros((B, T), dtype=np.float32),           # non-input ("other") DANs only
+        "dan_rate_driven_hz": np.zeros((B, T), dtype=np.float32),    # directly-driven (PAM+PPL input) DANs only
     }
     dan_by_at = {None: [], "food": [], "smoke": [], "reels": []}
     episode_infos = [[] for _ in range(B)]
@@ -90,6 +91,7 @@ def run_eval(ckpt_path, episodes: int, seed_base: int = 2000, save_traj: bool = 
         actions = policy.act(obs)
         obs, rewards, dones, infos = env.step(actions)
         dan_rate = policy.mean_dan_rate_hz()
+        dan_rate_driven = policy.dan_rate_driven_hz()
         for i, sub_env in enumerate(env.envs):
             traj["x"][i, t] = sub_env.pos[0]
             traj["y"][i, t] = sub_env.pos[1]
@@ -104,6 +106,7 @@ def run_eval(ckpt_path, episodes: int, seed_base: int = 2000, save_traj: bool = 
             traj["jackpot"][i, t] = bool(info.get("jackpot", False)) if info else False
             traj["reward"][i, t] = float(rewards[i])
             traj["dan_rate_hz"][i, t] = float(dan_rate[i])
+            traj["dan_rate_driven_hz"][i, t] = float(dan_rate_driven[i])
             if info:
                 episode_infos[i].append(info)
                 dan_by_at[at].append(float(dan_rate[i]))

@@ -8,10 +8,12 @@ Rationale (see spec): ES found no learning signal for taxis in v2. Before
 spending more compute on ES, this module asks a narrower question: is the
 steering information linearly decodable from the (frozen-brain) descending-
 neuron readout features AT ALL? The ENCODER is held FIXED at its
-initialization throughout (own-channel drive + bilateral-contrast routing,
-i.e. exactly ``flyrl.policy.default_params()``'s encoder block) -- only the
-DECODER (2x64 + 2 = 130 params) is fit, by DAgger + ridge regression onto
-the scripted teacher's action.
+initialization throughout (v4: the 19-param shared steer_L/steer_R block +
+the 6 own-channel contact/intero groups, i.e. exactly
+``flyrl.policy.default_params()``'s encoder block) -- only the DECODER
+(2 x flyrl.policy.N_FEATURES + 2 params -- 64, or 128 if
+``flyrl.policy.USE_SLOW_TRACE``, +1 more if ``ADD_NO_SIGNAL_FEATURE``) is
+fit, by DAgger + ridge regression onto the scripted teacher's action.
 
 Algorithm
 ---------
@@ -82,14 +84,16 @@ from pathlib import Path
 import numpy as np
 
 from flyrl.addiction_env import VecFlyAddictionEnv
-from flyrl.policy import BrainPolicy, default_params, N_PARAMS, N_GROUPS, N_ENC_IN, N_POOLS, N_ACTIONS
+from flyrl.policy import (
+    BrainPolicy, default_params, _load_readout_cache,
+    N_PARAMS, N_ENC_PARAMS, N_GROUPS, N_POOLS, N_FEATURES, N_ACTIONS,
+)
 from flyrl.taxis import MODALITIES, MODALITY_KEEP_CHANNELS, mask_obs, _distances
 from flyrl.scripted import _steer_towards, _SOURCE_CHANNELS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_ROOT = REPO_ROOT / "results"
 
-N_ENC_PARAMS = N_GROUPS * N_ENC_IN + N_GROUPS  # encoder weight + bias block size
 TARGET_CLIP = 0.97
 
 BETA_SCHEDULE = [1.0, 0.5, 0.3, 0.2, 0.1, 0.0, 0.0, 0.0]
@@ -215,16 +219,23 @@ def fixed_encoder_block(seed: int = 0) -> np.ndarray:
 
 
 def assemble_theta(enc_block: np.ndarray, W_dec: np.ndarray, b_dec: np.ndarray) -> np.ndarray:
-    """W_dec: (N_POOLS, N_ACTIONS) as returned by ridge_fit; b_dec: (N_ACTIONS,).
-    Returns a flat (N_PARAMS,) theta matching flyrl.policy's layout exactly."""
-    W_dec_policy = W_dec.T.astype(np.float32)  # (N_ACTIONS, N_POOLS), policy.py's layout
+    """W_dec: (N_FEATURES, N_ACTIONS) as returned by ridge_fit; b_dec: (N_ACTIONS,).
+    N_FEATURES == policy.N_FEATURES (64, or 128 if flyrl.policy.USE_SLOW_TRACE,
+    +1 more if flyrl.policy.ADD_NO_SIGNAL_FEATURE) -- W_dec's row count MUST
+    match whatever flyrl.policy is currently configured for. Returns a flat
+    (N_PARAMS,) theta matching flyrl.policy's layout exactly."""
+    assert W_dec.shape[0] == N_FEATURES, (
+        f"W_dec has {W_dec.shape[0]} feature rows, but flyrl.policy.N_FEATURES={N_FEATURES} "
+        "(USE_SLOW_TRACE/ADD_NO_SIGNAL_FEATURE mismatch between fit-time and current policy.py config)"
+    )
+    W_dec_policy = W_dec.T.astype(np.float32)  # (N_ACTIONS, N_FEATURES), policy.py's layout
     theta = np.concatenate([enc_block.astype(np.float32), W_dec_policy.reshape(-1), b_dec.astype(np.float32)])
     assert theta.shape == (N_PARAMS,)
     return theta
 
 
 def zero_decoder_Wb():
-    return np.zeros((N_POOLS, N_ACTIONS), dtype=np.float64), np.zeros((N_ACTIONS,), dtype=np.float64)
+    return np.zeros((N_FEATURES, N_ACTIONS), dtype=np.float64), np.zeros((N_ACTIONS,), dtype=np.float64)
 
 
 # ---------------------------------------------------------------------
@@ -349,6 +360,47 @@ def eval_rollout(mode: str, modality: str, n_substeps: int, seed_base: int = EVA
     return {
         "reach_rate": float(reached.mean()),
         "mean_dist_reduction": float(np.mean(init_dist - final_dist)),
+    }
+
+
+def diagnose_no_signal_search(policy: BrainPolicy, modality: str, enc_block: np.ndarray,
+                               W_dec: np.ndarray, b_dec: np.ndarray, n_substeps: int = 300,
+                               n_envs: int = N_EVAL_ENVS, seed_base: int = EVAL_SEED_BASE) -> dict:
+    """Task 2: does the learner ROTATE TO SEARCH (like the scripted teacher's
+    own `max(L,R) < lost_signal_eps -> spin in place` fallback,
+    flyrl.scripted._steer_towards) when it has NO directional cue at all for
+    `modality` -- e.g. reels outside its +-120deg field of view? Reports the
+    fraction of steps with no signal and the mean |turn action| conditioned
+    on no-signal vs signal (a searching policy should show |turn| well above
+    0 -- ideally near the teacher's 1.0 -- specifically on no-signal steps)."""
+    vec_env = VecFlyAddictionEnv(num_envs=n_envs, n_steps=300)
+    B = n_envs
+    theta = np.tile(assemble_theta(enc_block, W_dec, b_dec), (B, 1))
+    policy.set_params(theta)
+    policy.reset()
+
+    obs = vec_env.reset(seed=seed_base)
+    obs_masked = mask_obs(obs, modality)
+    no_signal_turns, signal_turns, no_signal_frac = [], [], []
+
+    for _ in range(n_substeps):
+        action = policy.act(obs_masked)
+        no_signal = policy.no_signal_feature()[:, 0] > 0.5  # (B,) bool
+        no_signal_frac.append(float(no_signal.mean()))
+        if no_signal.any():
+            no_signal_turns.append(np.abs(action[no_signal, 0]))
+        if (~no_signal).any():
+            signal_turns.append(np.abs(action[~no_signal, 0]))
+        obs, _r, _d, _infos = vec_env.step(action)
+        obs_masked = mask_obs(obs, modality)
+
+    ns_turns = np.concatenate(no_signal_turns) if no_signal_turns else np.zeros(0)
+    s_turns = np.concatenate(signal_turns) if signal_turns else np.zeros(0)
+    return {
+        "frac_steps_no_signal": float(np.mean(no_signal_frac)),
+        "mean_abs_turn_when_no_signal": float(ns_turns.mean()) if ns_turns.size else float("nan"),
+        "mean_abs_turn_when_signal": float(s_turns.mean()) if s_turns.size else float("nan"),
+        "n_no_signal_samples": int(ns_turns.size),
     }
 
 
@@ -506,12 +558,16 @@ def main(argv=None):
     bY = np.arctanh(np.clip(bypass_Y_all, -TARGET_CLIP, TARGET_CLIP))
     b_mean_r2, b_lam, bW, bb, b_r2 = choose_lambda_and_fit(bXn[tr_idx], bY[tr_idx], bXn[va_idx], bY[va_idx])
 
-    # slow-trace ablation: fast (z-normed) + slow (standardized) concatenated
-    slow_mean = X_train_slow_pool.mean(axis=0)
-    slow_std = X_train_slow_pool.std(axis=0) + 1e-6
-    X_slow_norm = (X_train_slow_pool - slow_mean) / slow_std
+    # slow-trace ablation: fast (z-normed via screen stats, already X_train_pool)
+    # concatenated with slow (z-normed via the SAME kind of FIXED screen stats,
+    # flyrl/readout_neurons.npz's pool_mean_slow/pool_std_slow -- consistent
+    # with how it would actually be integrated into BrainPolicy if adopted,
+    # unlike v3's train-pool-derived standardization).
+    _, _, _, _, _, _, _, pool_mean_slow, pool_std_slow = _load_readout_cache()
+    assert pool_mean_slow is not None, "flyrl/readout_neurons.npz missing pool_mean_slow -- rerun scripts/diag_readout.py"
+    X_slow_norm = (X_train_slow_pool - pool_mean_slow) / pool_std_slow
     X_dual_train = np.concatenate([X_train_pool, X_slow_norm], axis=1)
-    val_slow_norm = (data.X_slow_raw[val_mask] - slow_mean) / slow_std
+    val_slow_norm = (data.X_slow_raw[val_mask] - pool_mean_slow) / pool_std_slow
     X_dual_val = np.concatenate([X_val, val_slow_norm], axis=1)
     dual_mean_r2, dual_lam, dW, db, dual_r2 = choose_lambda_and_fit(
         X_dual_train, Y_train_pool, X_dual_val, Y_val)
@@ -529,11 +585,35 @@ def main(argv=None):
                                                policy=eval_policy, enc_block=enc_block, W_dec=W_dec, b_dec=b_dec,
                                                swap_lr=True)
 
+    # Task 2: evaluate the FINAL learner at the real episode length
+    # (300 steps, not the 120-step sub-episodes used for DAgger training/
+    # iteration reporting above), per modality.
+    print("Evaluating final learner at 300-step sub-episodes (real episode length) ...")
+    eval_300 = {}
+    for modality in MODALITIES:
+        eval_300[modality] = eval_rollout("learner", modality, 300, n_envs=args.eval_envs,
+                                           policy=eval_policy, enc_block=enc_block, W_dec=W_dec, b_dec=b_dec,
+                                           swap_lr=False)
+        print(f"  {modality:>6s}  300-step reach={eval_300[modality]['reach_rate']:.3f}  "
+              f"dist_red={eval_300[modality]['mean_dist_reduction']:+.4f}")
+
+    # Task 2: does the learner rotate to search when it has no directional
+    # signal at all (reels' limited +-120deg FOV is the main suspect)?
+    print("Diagnosing no-signal search behaviour (300-step) per modality ...")
+    no_signal_diag = {}
+    for modality in MODALITIES:
+        no_signal_diag[modality] = diagnose_no_signal_search(
+            eval_policy, modality, enc_block, W_dec, b_dec, n_substeps=300, n_envs=args.eval_envs)
+        d = no_signal_diag[modality]
+        print(f"  {modality:>6s}  frac_no_signal={d['frac_steps_no_signal']:.3f}  "
+              f"|turn|_no_signal={d['mean_abs_turn_when_no_signal']:.3f}  "
+              f"|turn|_signal={d['mean_abs_turn_when_signal']:.3f}")
+
     controls = {
         "bypass_brain_ceiling": {
             "lambda": b_lam, "r2_turn": float(b_r2[0]), "r2_forward": float(b_r2[1]),
             "n_train": int(len(tr_idx)), "n_val": int(len(va_idx)),
-            "note": "ridge decoder fit on raw encoder group-rates (12-dim) passed through "
+            "note": f"ridge decoder fit on raw encoder group-rates ({N_GROUPS}-dim) passed through "
                     "the same tau=50ms leaky-trace recursion the brain readout uses, "
                     "BYPASSING the frozen brain entirely.",
         },
@@ -543,14 +623,20 @@ def main(argv=None):
         "slow_trace_ablation": {
             "lambda": dual_lam, "r2_turn": float(dual_r2[0]), "r2_forward": float(dual_r2[1]),
             "adopted": slow_helps,
-            "note": "tau=50ms (64, z-normed via screen stats) concatenated with tau=200ms "
-                    "(64, standardized from the train pool) -> 128 features. Adopted in the "
-                    "final checkpoint only if mean R^2 improves by > 0.03 over fast-trace-only.",
+            "note": "tau=50ms (64, z-normed via fixed screen stats) concatenated with tau=200ms "
+                    "(64, z-normed via fixed screen stats pool_mean_slow/pool_std_slow) -> 128 "
+                    "features. If mean R^2 improves by > 0.03 over fast-trace-only, "
+                    "flyrl.policy.USE_SLOW_TRACE must be set True and this run re-launched from "
+                    "scratch so the DAgger decoder is actually fit at feature dim 128 (no "
+                    "half-measures -- this script only REPORTS the ablation, it does not flip "
+                    "the flag or refit itself).",
         },
         "lr_swap_sanity_check": {
             modality: {"normal": normal_results[modality], "swapped": swap_results[modality]}
             for modality in MODALITIES
         },
+        "eval_300step": eval_300,
+        "no_signal_search_diagnostic": no_signal_diag,
         "baselines": baseline,
     }
     with open(controls_path, "w") as f:

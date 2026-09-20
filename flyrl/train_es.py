@@ -39,6 +39,20 @@ VecFlyAddictionEnv.reset(). VecFlyAddictionEnv.step() is used unmodified.
 Evaluation (`_evaluate_mean`) uses the standard per-index-offset reset
 (8 distinct fixed seeds), since eval wants a diverse fixed benchmark, not
 CRN across ES noise directions.
+
+Task 3 (I/O v4 preference learning): the 19 v4 steering-encoder params
+(a/c/m/h/b -- see flyrl.policy) get a LARGER, per-parameter ES mutation
+sigma (--sigma-steer, spec 0.3) than the decoder + 12 contact/intero
+encoder params (--sigma, spec 0.05) -- see
+flyrl.policy.steering_param_sigma_vector and build_population/es_gradient's
+docstrings, which both accept a (P,) sigma array as well as a scalar. Every
+--eval-every (spec: 5) generations the noiseless mean is evaluated on
+--eval-episodes (spec: 8) fixed seeds and eval.csv logs BOTH true welfare
+and the mode-dependent fitness (so the welfare/fitness gap the hijack
+creates is visible over training, not just at the end), addiction metrics,
+DAN rates, AND the current value of every steering param (a, c, m, h, b),
+so preference drift toward/away from any source is visible directly in
+eval.csv.
 """
 
 from __future__ import annotations
@@ -53,7 +67,10 @@ import numpy as np
 import torch
 
 from flyrl.addiction_env import VecFlyAddictionEnv, addiction_metrics
-from flyrl.policy import BrainPolicy, default_params, N_PARAMS
+from flyrl.policy import (
+    BrainPolicy, default_params, N_PARAMS, N_STEER_PARAMS,
+    steering_param_names, unpack_steering_params, steering_param_sigma_vector,
+)
 from flyrl.taxis import MODALITIES, run_taxis_generation
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -81,13 +98,14 @@ def _vec_reset_common_seed(vec_env: VecFlyAddictionEnv, seed: int) -> np.ndarray
 
 
 class EpisodeResult:
-    __slots__ = ("fitness", "welfare", "metrics", "mean_dan_rate")
+    __slots__ = ("fitness", "welfare", "metrics", "mean_dan_rate", "mean_dan_rate_driven")
 
-    def __init__(self, fitness, welfare, metrics, mean_dan_rate):
+    def __init__(self, fitness, welfare, metrics, mean_dan_rate, mean_dan_rate_driven):
         self.fitness = fitness            # (B,) fitness used for ES (mode-dependent)
         self.welfare = welfare            # (B,) true summed env reward, always
         self.metrics = metrics            # list of B addiction_metrics dicts
-        self.mean_dan_rate = mean_dan_rate  # (B,) Hz, averaged over episode
+        self.mean_dan_rate = mean_dan_rate  # (B,) Hz, non-input ("other") DANs only, averaged over episode
+        self.mean_dan_rate_driven = mean_dan_rate_driven  # (B,) Hz, directly-driven (PAM+PPL input) DANs only
 
 
 def run_episode_batch(policy: BrainPolicy, vec_env: VecFlyAddictionEnv, theta_pop: np.ndarray,
@@ -111,6 +129,7 @@ def run_episode_batch(policy: BrainPolicy, vec_env: VecFlyAddictionEnv, theta_po
     welfare = np.zeros(B, dtype=np.float64)
     fitness = np.zeros(B, dtype=np.float64)
     dan_rate_sum = np.zeros(B, dtype=np.float64)
+    dan_rate_driven_sum = np.zeros(B, dtype=np.float64)
     discount = 1.0
     episode_infos = [[] for _ in range(B)]
 
@@ -134,13 +153,16 @@ def run_episode_batch(policy: BrainPolicy, vec_env: VecFlyAddictionEnv, theta_po
             if info:
                 episode_infos[i].append(info)
         dan_rate_sum += policy.mean_dan_rate_hz()
+        dan_rate_driven_sum += policy.dan_rate_driven_hz()
 
     if mode == "welfare":
         fitness = welfare.copy()
 
     metrics = [addiction_metrics(episode_infos[i]) for i in range(B)]
     mean_dan_rate = dan_rate_sum / n_steps
-    return EpisodeResult(fitness=fitness, welfare=welfare, metrics=metrics, mean_dan_rate=mean_dan_rate)
+    mean_dan_rate_driven = dan_rate_driven_sum / n_steps
+    return EpisodeResult(fitness=fitness, welfare=welfare, metrics=metrics,
+                          mean_dan_rate=mean_dan_rate, mean_dan_rate_driven=mean_dan_rate_driven)
 
 
 # ---------------------------------------------------------------------
@@ -155,9 +177,14 @@ def rank_transform(fitness: np.ndarray) -> np.ndarray:
     return ranks / (len(fitness) - 1) - 0.5
 
 
-def es_gradient(eps_half: np.ndarray, fitness: np.ndarray, sigma: float) -> np.ndarray:
+def es_gradient(eps_half: np.ndarray, fitness: np.ndarray, sigma) -> np.ndarray:
     """Antithetic OpenAI-ES gradient estimate. eps_half: (H, P) sampled
-    directions; fitness: (2H,) for population [mean+sigma*eps, mean-sigma*eps]."""
+    directions; fitness: (2H,) for population [mean+sigma*eps, mean-sigma*eps].
+    `sigma` may be a scalar or a (P,) per-parameter array (Task 3: the 19
+    steering-encoder params get a larger sigma than the rest -- see
+    flyrl.policy.steering_param_sigma_vector) -- the division below is then
+    elementwise, giving each parameter i a gradient estimate scaled by its
+    OWN sigma_i, exactly the per-parameter-sigma OpenAI-ES estimator."""
     H = eps_half.shape[0]
     eps_full = np.concatenate([eps_half, -eps_half], axis=0)  # (2H, P)
     centered = rank_transform(fitness)
@@ -192,7 +219,9 @@ class Adam:
         self.t = int(d["t"])
 
 
-def build_population(mean_theta: np.ndarray, sigma: float, half: int, rng: np.random.Generator):
+def build_population(mean_theta: np.ndarray, sigma, half: int, rng: np.random.Generator):
+    """`sigma` may be a scalar or a (P,) per-parameter array -- see
+    es_gradient's docstring (Task 3 per-parameter sigma scaling)."""
     eps_half = rng.standard_normal((half, mean_theta.shape[0])).astype(np.float64)
     theta_pop = np.concatenate([
         mean_theta[None, :] + sigma * eps_half,
@@ -208,14 +237,20 @@ def build_population(mean_theta: np.ndarray, sigma: float, half: int, rng: np.ra
 LOG_COLUMNS = [
     "gen", "wall_s", "fitness_mean", "fitness_max", "welfare_mean", "welfare_max",
     "frac_food", "frac_smoke", "frac_reels", "compulsion_smoke", "compulsion_reels",
-    "mean_withdrawal", "final_tolerance", "mean_dan_rate_hz",
+    "mean_withdrawal", "final_tolerance", "mean_dan_rate_hz", "mean_dan_rate_driven_hz",
 ]
 
+# Task 3: every --eval-every generations, evaluate the NOISELESS mean on
+# --eval-episodes fixed seeds and log both true welfare and the
+# mode-dependent (hijacked or welfare) fitness, addiction metrics, DAN
+# rates, AND the current values of the 19 steering-encoder params (a, c, m,
+# h, b) -- so preference drift toward/away from any source is visible
+# directly in eval.csv over the course of training.
 EVAL_COLUMNS = [
-    "gen", "return_mean", "return_max",
+    "gen", "welfare_mean", "welfare_max", "fitness_mean", "fitness_max",
     "frac_food", "frac_smoke", "frac_reels", "compulsion_smoke", "compulsion_reels",
-    "mean_withdrawal", "final_tolerance", "mean_dan_rate_hz",
-]
+    "mean_withdrawal", "final_tolerance", "mean_dan_rate_hz", "mean_dan_rate_driven_hz",
+] + steering_param_names()
 
 # Task C: --mode taxis logging (per-modality reach rate + mean distance
 # reduction, in addition to the pooled fitness ES actually optimizes).
@@ -305,7 +340,13 @@ def main(argv=None):
     parser.add_argument("--run-name", type=str, required=True)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--population", type=int, default=32)
-    parser.add_argument("--sigma", type=float, default=0.1)
+    parser.add_argument("--sigma", type=float, default=0.05,
+                         help="ES mutation sigma for the decoder + 12 contact/intero encoder "
+                              "params (spec: 0.05).")
+    parser.add_argument("--sigma-steer", type=float, default=0.3,
+                         help="LARGER ES mutation sigma for the 19 steering-encoder params "
+                              "(a/c/m/h/b -- O(1) quantities, spec: 0.3). Per-parameter sigma "
+                              "scaling (Task 3); see flyrl.policy.steering_param_sigma_vector.")
     parser.add_argument("--sigma-decay", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=0.03)
     parser.add_argument("--n-steps", type=int, default=300)
@@ -317,7 +358,8 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=18)
     parser.add_argument("--checkpoint-every", type=int, default=5)
-    parser.add_argument("--eval-every", type=int, default=10)
+    parser.add_argument("--eval-every", type=int, default=5,
+                         help="spec (Task 3): evaluate the noiseless mean every 5 generations.")
     parser.add_argument("--eval-episodes", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init-from", type=str, default=None,
@@ -361,7 +403,13 @@ def main(argv=None):
         adam = Adam(mean_theta.shape[0], lr=args.lr)
         start_gen = 0
 
-    sigma = args.sigma * (args.sigma_decay ** start_gen)
+    # Task 3: per-parameter ES sigma -- the 19 steering-encoder params (a, c,
+    # m, h, b) get a LARGER sigma (spec: 0.3) than the decoder + 12 contact/
+    # intero encoder params (spec: 0.05), since the steering params are O(1)
+    # quantities and where preference lives; --sigma alone would either
+    # barely move them or blow up the decoder.
+    sigma_vec = steering_param_sigma_vector(args.sigma, args.sigma_steer, mean_theta.shape[0])
+    sigma_vec = sigma_vec * (args.sigma_decay ** start_gen)
 
     print(f"BrainPolicy(batch={args.population}) ... (loading brain weights)")
     policy = BrainPolicy(batch=args.population, device=args.device, dt=args.dt,
@@ -382,7 +430,7 @@ def main(argv=None):
     for gen in range(start_gen, args.gens):
         t0 = time.time()
         noise_rng = np.random.default_rng([args.seed, gen])
-        theta_pop, eps_half = build_population(mean_theta, sigma, half, noise_rng)
+        theta_pop, eps_half = build_population(mean_theta, sigma_vec, half, noise_rng)
 
         env_seed = args.seed + 1_000_000 + gen
         if is_taxis:
@@ -394,10 +442,10 @@ def main(argv=None):
                                         beta_jackpot=args.beta_jackpot, gamma=args.gamma,
                                         common_seed=True)
 
-        grad = es_gradient(eps_half, result.fitness, sigma)
+        grad = es_gradient(eps_half, result.fitness, sigma_vec)
         update = adam.step(grad)
         mean_theta = mean_theta + update
-        sigma *= args.sigma_decay
+        sigma_vec = sigma_vec * args.sigma_decay
 
         wall_s = time.time() - t0
         if is_taxis:
@@ -420,6 +468,7 @@ def main(argv=None):
                 "fitness_mean": float(result.fitness.mean()), "fitness_max": float(result.fitness.max()),
                 "welfare_mean": float(result.welfare.mean()), "welfare_max": float(result.welfare.max()),
                 "mean_dan_rate_hz": float(result.mean_dan_rate.mean()),
+                "mean_dan_rate_driven_hz": float(result.mean_dan_rate_driven.mean()),
                 **msum,
             }
             _append_csv_row(log_path, LOG_COLUMNS, row)
@@ -427,7 +476,7 @@ def main(argv=None):
                   f"fitness={row['fitness_mean']:8.3f}/{row['fitness_max']:8.3f}  "
                   f"welfare={row['welfare_mean']:8.3f}/{row['welfare_max']:8.3f}  "
                   f"food={row['frac_food']:.2f} smoke={row['frac_smoke']:.2f} reels={row['frac_reels']:.2f}  "
-                  f"dan={row['mean_dan_rate_hz']:.1f}Hz")
+                  f"dan={row['mean_dan_rate_hz']:.1f}Hz/{row['mean_dan_rate_driven_hz']:.1f}Hz")
 
         if (gen + 1) % args.checkpoint_every == 0 or gen == args.gens - 1:
             save_checkpoint(run_dir, gen + 1, mean_theta, adam, config)
@@ -451,15 +500,23 @@ def main(argv=None):
                                               beta_jackpot=args.beta_jackpot, gamma=args.gamma,
                                               eval_seed=123456)
                 emsum = _summarize_metrics(eval_result.metrics)
+                steer_vals = unpack_steering_params(mean_theta)
                 erow = {
-                    "gen": gen, "return_mean": float(eval_result.welfare.mean()),
-                    "return_max": float(eval_result.welfare.max()),
+                    "gen": gen,
+                    "welfare_mean": float(eval_result.welfare.mean()),
+                    "welfare_max": float(eval_result.welfare.max()),
+                    "fitness_mean": float(eval_result.fitness.mean()),
+                    "fitness_max": float(eval_result.fitness.max()),
                     "mean_dan_rate_hz": float(eval_result.mean_dan_rate.mean()),
-                    **emsum,
+                    "mean_dan_rate_driven_hz": float(eval_result.mean_dan_rate_driven.mean()),
+                    **emsum, **steer_vals,
                 }
                 _append_csv_row(eval_path, EVAL_COLUMNS, erow)
-                print(f"  [eval] gen {gen:4d}  return={erow['return_mean']:8.3f}/{erow['return_max']:8.3f}  "
-                      f"food={erow['frac_food']:.2f} smoke={erow['frac_smoke']:.2f} reels={erow['frac_reels']:.2f}")
+                print(f"  [eval] gen {gen:4d}  welfare={erow['welfare_mean']:8.3f}  "
+                      f"fitness={erow['fitness_mean']:8.3f}  "
+                      f"food={erow['frac_food']:.2f} smoke={erow['frac_smoke']:.2f} reels={erow['frac_reels']:.2f}  "
+                      f"a={[round(steer_vals[f'a_{s}'],2) for s in ('food','smoke','reels')]}  "
+                      f"c={[round(steer_vals[f'c_{s}'],2) for s in ('food','smoke','reels')]}")
 
     save_checkpoint(run_dir, args.gens, mean_theta, adam, config)
     print(f"Training complete: {args.gens} generations. Final checkpoint: {run_dir/'ckpt.npz'}")
